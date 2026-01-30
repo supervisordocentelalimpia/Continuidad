@@ -1,22 +1,32 @@
-import { getDocument, GlobalWorkerOptions } from "pdfjs-dist";
-import workerSrc from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+import * as pdfjsLib from "pdfjs-dist";
+import pdfjsWorker from "pdfjs-dist/build/pdf.worker.min?url";
 
-GlobalWorkerOptions.workerSrc = workerSrc;
+// Necesario en Vite/GitHub Pages
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
 
-export async function extractTextFromPdfFile(file) {
-  const data = await file.arrayBuffer();
-  const pdf = await getDocument({ data }).promise;
+export async function extractTextFromPdf(file) {
+  if (!file) return "";
 
-  let out = "";
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+
+  let fullText = "";
+
   for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
     const page = await pdf.getPage(pageNum);
     const content = await page.getTextContent();
 
-    for (const item of content.items) {
-      out += item.str;
-      out += item.hasEOL ? "\n" : " ";
-    }
-    out += "\n";
+    const pageText = content.items
+      .map((it) => (typeof it.str === "string" ? it.str : ""))
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    if (pageText) fullText += pageText + "\n";
   }
-  return out;
+
+  return fullText.trim();
 }
+
+// También export default por si en algún sitio lo importas distinto
+export default extractTextFromPdf;
