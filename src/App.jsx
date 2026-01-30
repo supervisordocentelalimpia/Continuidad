@@ -1,178 +1,193 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
+import * as XLSX from "xlsx";
 import {
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-  PieChart,
-  Pie,
-  Cell,
-  Legend,
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
+  PieChart, Pie, Cell, Legend
 } from "recharts";
 import {
-  Search,
-  Users,
-  Clock,
-  AlertTriangle,
-  Download,
-  CheckCircle,
-  XCircle,
-  Filter,
-  Phone,
-  Upload,
-  FileText,
-  RefreshCw,
-  ChevronRight,
-  Trash2,
-  FileSpreadsheet,
+  Search, Users, Clock, AlertTriangle, Download,
+  CheckCircle, XCircle, Filter, Phone, Upload, FileText, RefreshCw, ChevronRight, Trash2
 } from "lucide-react";
 
-import * as XLSX from "xlsx";
-import { extractTextFromPdfFile } from "./utils/pdfText";
-import { parseCevazListFromPdfText } from "./utils/parseCevazPdf";
+import { parseCevazPdf, __HORARIO_BLOQUES__ } from "./utils/parseCevazPdf";
 
-const COLORS = ["#2563eb", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6"];
+const COLORS = ["#0088FE", "#00C49F", "#FFBB28", "#FF8042", "#8884d8"];
 
-function normalizeLevel(level = "") {
-  return String(level).replace(/(LEVEL|NIVEL)\s+/i, "L").trim() || "N/A";
-}
+const isGraduated = (student) => (student?.levelNorm || "").toUpperCase() === "L19";
 
-function isGraduated(level = "") {
-  // Excluye Level 19 / Nivel 19
-  const up = String(level).toUpperCase();
-  return up.includes("19");
-}
+const DashboardContinuidad = () => {
+  const [activeTab, setActiveTab] = useState("upload"); // 'upload' | 'dashboard'
 
-function csvEscape(value) {
-  const s = String(value ?? "");
-  // Escapar comillas
-  const escaped = s.replace(/"/g, '""');
-  return `"${escaped}"`;
-}
+  const [pdfOld, setPdfOld] = useState(null);
+  const [pdfNew, setPdfNew] = useState(null);
 
-function downloadBlob(blob, filename) {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
-}
-
-export default function App() {
-  const [activeTab, setActiveTab] = useState("upload"); // upload | dashboard
-
-  const [oldPdf, setOldPdf] = useState(null);
-  const [newPdf, setNewPdf] = useState(null);
-
-  const [processing, setProcessing] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
 
-  const [processedDropouts, setProcessedDropouts] = useState([]);
+  const [oldStudents, setOldStudents] = useState([]);
+  const [newStudents, setNewStudents] = useState([]);
+  const [dropouts, setDropouts] = useState([]);
+
   const [stats, setStats] = useState({
     totalOld: 0,
     totalNew: 0,
-    retentionRate: 0,
+    eligibleOld: 0,
+    reenrolled: 0,
+    reenrolledPct: 0,
+    lost: 0,
+    lostPct: 0,
   });
 
-  const [searchTerm, setSearchTerm] = useState("");
-  const [selectedShift, setSelectedShift] = useState("All");
+  // Gestión
   const [contacted, setContacted] = useState(new Set());
 
-  const [periodLabel, setPeriodLabel] = useState("");
+  // Filtros
+  const [searchTerm, setSearchTerm] = useState("");
+  const [selectedCategory, setSelectedCategory] = useState("All");
+  const [selectedLevel, setSelectedLevel] = useState("All");
+  const [selectedHorario, setSelectedHorario] = useState("All");
 
-  async function processPdfs() {
+  const resetAll = () => {
+    setPdfOld(null);
+    setPdfNew(null);
+    setOldStudents([]);
+    setNewStudents([]);
+    setDropouts([]);
+    setContacted(new Set());
+    setSearchTerm("");
+    setSelectedCategory("All");
+    setSelectedLevel("All");
+    setSelectedHorario("All");
+    setStats({
+      totalOld: 0, totalNew: 0, eligibleOld: 0,
+      reenrolled: 0, reenrolledPct: 0, lost: 0, lostPct: 0
+    });
     setErrorMsg("");
-    if (!oldPdf || !newPdf) {
-      setErrorMsg("Debes seleccionar el PDF viejo (Anterior) y el PDF nuevo (Actual).");
+    setActiveTab("upload");
+  };
+
+  const processPdfs = async () => {
+    setErrorMsg("");
+    if (!pdfOld || !pdfNew) {
+      setErrorMsg("Debes seleccionar el PDF ANTERIOR y el PDF ACTUAL.");
       return;
     }
 
-    setProcessing(true);
     try {
-      // 1) Extraer texto
-      const oldText = await extractTextFromPdfFile(oldPdf);
-      const newText = await extractTextFromPdfFile(newPdf);
+      setLoading(true);
 
-      // 2) Parsear texto a listas
-      const oldList = parseCevazListFromPdfText(oldText);
-      const newList = parseCevazListFromPdfText(newText);
+      const [oldList, newList] = await Promise.all([
+        parseCevazPdf(pdfOld),
+        parseCevazPdf(pdfNew),
+      ]);
 
-      if (!oldList.length) {
-        setErrorMsg(
-          "No pude leer alumnos del PDF ANTERIOR. Si el PDF está escaneado (imagen), no se puede extraer texto."
-        );
-      }
-      if (!newList.length) {
-        setErrorMsg(
-          "No pude leer alumnos del PDF ACTUAL. Si el PDF está escaneado (imagen), no se puede extraer texto."
-        );
-      }
+      // Normalizar duplicados por cédula (por si aparece repetido en el PDF)
+      const uniqById = (arr) => {
+        const map = new Map();
+        for (const s of arr) {
+          if (!s?.id) continue;
+          if (!map.has(s.id)) map.set(s.id, s);
+        }
+        return Array.from(map.values());
+      };
 
-      const newIds = new Set(newList.map((s) => s.id));
+      const oldU = uniqById(oldList);
+      const newU = uniqById(newList);
 
-      // 3) Dropouts = estaban antes y no están ahora, excluyendo graduados
-      const dropouts = oldList.filter((s) => {
-        const reenrolled = newIds.has(s.id);
-        return !reenrolled && !isGraduated(s.level);
-      });
+      const newIds = new Set(newU.map((s) => s.id));
 
-      const retentionRate = oldList.length
-        ? Math.round(((oldList.length - dropouts.length) / oldList.length) * 100)
-        : 0;
+      const eligibleOld = oldU.filter((s) => !isGraduated(s));
+      const reenrolled = eligibleOld.filter((s) => newIds.has(s.id));
+      const lost = eligibleOld.filter((s) => !newIds.has(s.id));
+
+      const reenrolledPct = eligibleOld.length ? Math.round((reenrolled.length / eligibleOld.length) * 100) : 0;
+      const lostPct = eligibleOld.length ? Math.round((lost.length / eligibleOld.length) * 100) : 0;
+
+      setOldStudents(oldU);
+      setNewStudents(newU);
+      setDropouts(lost);
+      setContacted(new Set());
 
       setStats({
-        totalOld: oldList.length,
-        totalNew: newList.length,
-        retentionRate,
+        totalOld: oldU.length,
+        totalNew: newU.length,
+        eligibleOld: eligibleOld.length,
+        reenrolled: reenrolled.length,
+        reenrolledPct,
+        lost: lost.length,
+        lostPct,
       });
-
-      setProcessedDropouts(dropouts);
-      setContacted(new Set());
-      setSearchTerm("");
-      setSelectedShift("All");
-      setPeriodLabel(`Comparación: ${oldPdf.name} → ${newPdf.name}`);
 
       setActiveTab("dashboard");
     } catch (e) {
-      setErrorMsg(
-        `Error procesando PDFs. Si el PDF está escaneado (imagen) no se puede leer. Detalle: ${e?.message || e}`
-      );
+      console.error(e);
+      setErrorMsg("No pude leer los PDFs. Si el PDF es escaneado (imagen), no se puede extraer texto.");
     } finally {
-      setProcessing(false);
+      setLoading(false);
     }
-  }
+  };
 
-  function clearAll() {
-    setOldPdf(null);
-    setNewPdf(null);
-    setProcessedDropouts([]);
-    setStats({ totalOld: 0, totalNew: 0, retentionRate: 0 });
-    setContacted(new Set());
-    setSearchTerm("");
-    setSelectedShift("All");
-    setErrorMsg("");
-    setPeriodLabel("");
-    setActiveTab("upload");
-  }
+  const toggleContact = (id) => {
+    const next = new Set(contacted);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    setContacted(next);
+  };
 
+  // Opciones dinámicas para filtros
+  const filterOptions = useMemo(() => {
+    const cats = Array.from(new Set(dropouts.map((s) => s.category).filter(Boolean))).sort();
+    const lvls = Array.from(new Set(dropouts.map((s) => s.levelNorm).filter(Boolean))).sort();
+    const hrs = Array.from(new Set(dropouts.map((s) => s.scheduleBlock).filter(Boolean)));
+
+    // Ordenar horarios: primero los bloques conocidos, luego lo demás
+    const known = __HORARIO_BLOQUES__ || [];
+    const knownSet = new Set(known);
+    const ordered = [
+      ...known.filter((h) => hrs.includes(h)),
+      ...hrs.filter((h) => !knownSet.has(h)).sort(),
+    ];
+
+    return {
+      categories: ["All", ...cats],
+      levels: ["All", ...lvls],
+      horarios: ["All", ...ordered],
+    };
+  }, [dropouts]);
+
+  // Filtrado principal
+  const filteredData = useMemo(() => {
+    const q = searchTerm.trim().toLowerCase();
+
+    return dropouts.filter((s) => {
+      const matchesSearch =
+        !q ||
+        (s.name || "").toLowerCase().includes(q) ||
+        (s.id || "").includes(q) ||
+        (s.email || "").toLowerCase().includes(q) ||
+        (s.phone || "").includes(q);
+
+      const matchesCategory = selectedCategory === "All" || s.category === selectedCategory;
+      const matchesLevel = selectedLevel === "All" || s.levelNorm === selectedLevel;
+      const matchesHorario = selectedHorario === "All" || s.scheduleBlock === selectedHorario;
+
+      return matchesSearch && matchesCategory && matchesLevel && matchesHorario;
+    });
+  }, [dropouts, searchTerm, selectedCategory, selectedLevel, selectedHorario]);
+
+  // Métricas para gráficas
   const metrics = useMemo(() => {
-    const totalDropouts = processedDropouts.length;
+    const total = dropouts.length;
 
-    const byShift = processedDropouts.reduce((acc, cur) => {
-      const key = cur.shift || "Otro";
-      acc[key] = (acc[key] || 0) + 1;
+    const byLevel = dropouts.reduce((acc, s) => {
+      const k = s.levelNorm || "N/A";
+      acc[k] = (acc[k] || 0) + 1;
       return acc;
     }, {});
 
-    const byLevel = processedDropouts.reduce((acc, cur) => {
-      const lvl = normalizeLevel(cur.level);
-      acc[lvl] = (acc[lvl] || 0) + 1;
+    const byHorario = dropouts.reduce((acc, s) => {
+      const k = s.scheduleBlock || "N/A";
+      acc[k] = (acc[k] || 0) + 1;
       return acc;
     }, {});
 
@@ -184,111 +199,81 @@ export default function App() {
         return na - nb;
       });
 
-    const chartDataShift = Object.keys(byShift).map((k) => ({
-      name: k,
-      value: byShift[k],
+    const chartDataHorario = Object.keys(byHorario)
+      .map((k) => ({ name: k, value: byHorario[k] }))
+      .sort((a, b) => b.value - a.value);
+
+    const topHorario = chartDataHorario[0]?.name || "N/A";
+
+    return { total, chartDataLevel, chartDataHorario, topHorario };
+  }, [dropouts]);
+
+  // Click en gráfica => filtra tabla
+  const onClickLevelBar = (e) => {
+    const label = e?.activeLabel;
+    if (!label) return;
+    setSelectedLevel(label);
+    // bajar al CRM mentalmente: no hacemos scroll automático para no pelear con móvil
+  };
+
+  const onClickPie = (data, index) => {
+    const name = data?.name;
+    if (!name) return;
+    setSelectedHorario(name);
+  };
+
+  const exportExcel = () => {
+    if (!filteredData.length) return;
+
+    const rows = filteredData.map((s) => ({
+      Estado: contacted.has(s.id) ? "Contactado" : "Pendiente",
+      Cedula: s.id,
+      Estudiante: s.name,
+      Categoria: s.category,
+      Nivel: s.levelNorm,
+      Horario: s.scheduleBlock,
+      Email: s.email || "",
+      Telefono: s.phone || "",
     }));
 
-    const worstShift =
-      chartDataShift.sort((a, b) => b.value - a.value)[0]?.name || "N/A";
-
-    return { totalDropouts, chartDataLevel, chartDataShift, worstShift };
-  }, [processedDropouts]);
-
-  const filteredData = useMemo(() => {
-    return processedDropouts.filter((s) => {
-      const term = searchTerm.trim().toLowerCase();
-      const matchesSearch =
-        !term ||
-        (s.name || "").toLowerCase().includes(term) ||
-        String(s.id || "").includes(term);
-
-      const matchesShift =
-        selectedShift === "All" || (s.shift || "Otro") === selectedShift;
-
-      return matchesSearch && matchesShift;
-    });
-  }, [processedDropouts, searchTerm, selectedShift]);
-
-  function toggleContact(id) {
-    setContacted((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }
-
-  function exportCsvExcelFriendly() {
-    // CSV “friendly” para Excel en español (usa ; y BOM UTF-8)
-    const headers = ["ID", "Nombre", "Nivel(Anterior)", "Horario(Anterior)", "Turno", "Estado"];
-    const rows = filteredData.map((s) => [
-      s.id,
-      s.name,
-      s.level,
-      s.schedule,
-      s.shift,
-      contacted.has(s.id) ? "Contactado" : "Pendiente",
-    ]);
-
-    const delimiter = ";";
-    const lines = [
-      headers.map(csvEscape).join(delimiter),
-      ...rows.map((r) => r.map(csvEscape).join(delimiter)),
-    ];
-
-    const bom = "\uFEFF";
-    const blob = new Blob([bom + lines.join("\n")], { type: "text/csv;charset=utf-8;" });
-    downloadBlob(blob, "reporte_continuidad.csv");
-  }
-
-  function exportXlsx() {
-    const headers = ["ID", "Nombre", "Nivel (Anterior)", "Horario (Anterior)", "Turno", "Estado"];
-    const rows = filteredData.map((s) => [
-      s.id,
-      s.name,
-      s.level,
-      s.schedule,
-      s.shift,
-      contacted.has(s.id) ? "Contactado" : "Pendiente",
-    ]);
-
-    const aoa = [headers, ...rows];
-    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    const ws = XLSX.utils.json_to_sheet(rows);
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "NoInscritos");
+    XLSX.utils.book_append_sheet(wb, ws, "No inscritos");
 
-    const out = XLSX.write(wb, { bookType: "xlsx", type: "array" });
-    const blob = new Blob([out], {
-      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    });
-    downloadBlob(blob, "reporte_continuidad.xlsx");
-  }
+    const today = new Date().toISOString().slice(0, 10);
+    XLSX.writeFile(wb, `continuidad_no_inscritos_${today}.xlsx`);
+  };
 
-  // ------------------- UI: UPLOAD -------------------
+  // ---------------- UPLOAD VIEW ----------------
   if (activeTab === "upload") {
     return (
-      <div className="min-h-screen bg-slate-50 p-6 text-slate-800">
+      <div className="min-h-screen bg-slate-50 p-6 font-sans text-slate-800">
         <header className="mb-6 pb-4 border-b border-slate-200">
           <h1 className="text-2xl font-bold text-slate-900 flex items-center gap-2">
             <Upload className="h-6 w-6 text-blue-600" />
             Continuidad - Cargar PDFs
           </h1>
           <p className="text-slate-500 text-sm mt-1">
-            Los PDFs se procesan localmente en tu navegador. <span className="font-semibold">No se guardan en GitHub</span>.
+            Los PDFs se procesan localmente en tu navegador. No se guardan en GitHub.
           </p>
         </header>
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {/* PDF viejo */}
-          <div className="bg-white border border-slate-200 rounded-xl p-5">
+        {errorMsg ? (
+          <div className="mb-4 p-4 rounded-lg border border-red-200 bg-red-50 text-red-700 text-sm">
+            {errorMsg}
+          </div>
+        ) : null}
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="bg-white p-5 rounded-xl border border-slate-100 shadow-sm">
             <div className="flex items-center justify-between mb-3">
               <span className="bg-red-100 text-red-700 px-2 py-0.5 rounded text-xs font-semibold">
                 Periodo ANTERIOR
               </span>
               <button
-                className="text-slate-400 hover:text-slate-600 text-sm flex items-center gap-1"
-                onClick={() => setOldPdf(null)}
+                className="text-slate-500 hover:text-slate-700 text-sm inline-flex items-center gap-2"
+                onClick={() => setPdfOld(null)}
+                type="button"
               >
                 <Trash2 className="h-4 w-4" />
                 Eliminar
@@ -298,23 +283,23 @@ export default function App() {
             <input
               type="file"
               accept="application/pdf"
-              onChange={(e) => setOldPdf(e.target.files?.[0] || null)}
+              onChange={(e) => setPdfOld(e.target.files?.[0] || null)}
               className="block w-full text-sm"
             />
-            <p className="text-xs text-slate-500 mt-2">
-              Seleccionado: <span className="font-medium">{oldPdf?.name || "—"}</span>
-            </p>
+            <div className="text-xs text-slate-500 mt-2">
+              {pdfOld ? `Seleccionado: ${pdfOld.name}` : "No hay PDF seleccionado."}
+            </div>
           </div>
 
-          {/* PDF nuevo */}
-          <div className="bg-white border border-slate-200 rounded-xl p-5">
+          <div className="bg-white p-5 rounded-xl border border-slate-100 shadow-sm">
             <div className="flex items-center justify-between mb-3">
               <span className="bg-green-100 text-green-700 px-2 py-0.5 rounded text-xs font-semibold">
                 Periodo ACTUAL
               </span>
               <button
-                className="text-slate-400 hover:text-slate-600 text-sm flex items-center gap-1"
-                onClick={() => setNewPdf(null)}
+                className="text-slate-500 hover:text-slate-700 text-sm inline-flex items-center gap-2"
+                onClick={() => setPdfNew(null)}
+                type="button"
               >
                 <Trash2 className="h-4 w-4" />
                 Eliminar
@@ -324,76 +309,66 @@ export default function App() {
             <input
               type="file"
               accept="application/pdf"
-              onChange={(e) => setNewPdf(e.target.files?.[0] || null)}
+              onChange={(e) => setPdfNew(e.target.files?.[0] || null)}
               className="block w-full text-sm"
             />
-            <p className="text-xs text-slate-500 mt-2">
-              Seleccionado: <span className="font-medium">{newPdf?.name || "—"}</span>
-            </p>
+            <div className="text-xs text-slate-500 mt-2">
+              {pdfNew ? `Seleccionado: ${pdfNew.name}` : "No hay PDF seleccionado."}
+            </div>
           </div>
         </div>
 
-        {errorMsg && (
-          <div className="mt-6 bg-red-50 border border-red-200 text-red-700 rounded-xl p-4 text-sm">
-            <div className="flex items-start gap-2">
-              <AlertTriangle className="h-5 w-5 mt-0.5" />
-              <div>{errorMsg}</div>
-            </div>
-          </div>
-        )}
-
-        <div className="mt-6 flex flex-wrap gap-3">
+        <div className="mt-6 flex flex-col sm:flex-row gap-3">
           <button
             onClick={processPdfs}
-            disabled={processing}
-            className="bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white px-6 py-3 rounded-xl font-bold flex items-center gap-2"
+            disabled={loading}
+            className="bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white px-6 py-3 rounded-xl font-bold shadow-lg inline-flex items-center gap-2"
           >
-            <RefreshCw className={`h-5 w-5 ${processing ? "animate-spin" : ""}`} />
-            {processing ? "Procesando..." : "Procesar y Comparar"}
+            <RefreshCw className={`h-5 w-5 ${loading ? "animate-spin" : ""}`} />
+            {loading ? "Procesando..." : "Procesar y Comparar"}
           </button>
 
           <button
-            onClick={clearAll}
-            className="bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 px-6 py-3 rounded-xl font-semibold flex items-center gap-2"
+            onClick={resetAll}
+            type="button"
+            className="bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 px-6 py-3 rounded-xl font-semibold inline-flex items-center gap-2"
           >
             <Trash2 className="h-5 w-5" />
             Limpiar todo
           </button>
         </div>
 
-        <p className="mt-6 text-xs text-slate-500">
-          Si el PDF está escaneado (imagen), el sistema no puede leer alumnos porque no hay texto.
+        <p className="text-xs text-slate-500 mt-4">
+          Nota: Si el PDF es escaneado (imagen), el sistema no podrá leer los alumnos.
         </p>
       </div>
     );
   }
 
-  // ------------------- UI: DASHBOARD -------------------
+  // ---------------- DASHBOARD VIEW ----------------
   return (
-    <div className="min-h-screen bg-slate-50 p-6 text-slate-800">
-      {/* HEADER */}
+    <div className="min-h-screen bg-slate-50 p-6 font-sans text-slate-800">
       <header className="mb-8 flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-200 pb-4">
         <div>
           <h1 className="text-3xl font-bold text-slate-900 flex items-center gap-2">
             <Users className="h-8 w-8 text-blue-600" />
             Dashboard de Continuidad
           </h1>
-
-          <p className="text-slate-500 mt-1 flex flex-wrap items-center gap-2">
+          <p className="text-slate-500 mt-1 flex items-center gap-2 flex-wrap">
             <span className="bg-slate-100 px-2 py-0.5 rounded text-xs font-mono">
-              Base: {stats.totalOld} alumnos
+              Base (sin graduados): {stats.eligibleOld}
             </span>
             <ChevronRight className="h-3 w-3" />
             <span className="bg-blue-50 text-blue-700 px-2 py-0.5 rounded text-xs font-bold">
-              Tasa Retención: {stats.retentionRate}%
+              Reinscritos: {stats.reenrolledPct}%
             </span>
-            {periodLabel ? (
-              <span className="text-xs text-slate-400">{periodLabel}</span>
-            ) : null}
+            <span className="bg-red-50 text-red-700 px-2 py-0.5 rounded text-xs font-bold">
+              Pérdida: {stats.lostPct}%
+            </span>
           </p>
         </div>
 
-        <div className="flex flex-wrap gap-3">
+        <div className="flex gap-3 flex-wrap">
           <button
             onClick={() => setActiveTab("upload")}
             className="flex items-center gap-2 bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 px-4 py-2 rounded-lg shadow-sm"
@@ -403,25 +378,16 @@ export default function App() {
           </button>
 
           <button
-            onClick={exportXlsx}
-            disabled={filteredData.length === 0}
-            className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white px-4 py-2 rounded-lg shadow"
+            onClick={exportExcel}
+            disabled={!filteredData.length}
+            className="flex items-center gap-2 bg-green-600 hover:bg-green-700 disabled:opacity-60 text-white px-4 py-2 rounded-lg shadow"
           >
-            <FileSpreadsheet className="h-4 w-4" />
+            <Download className="h-4 w-4" />
             Exportar Excel
           </button>
 
           <button
-            onClick={exportCsvExcelFriendly}
-            disabled={filteredData.length === 0}
-            className="flex items-center gap-2 bg-green-600 hover:bg-green-700 disabled:opacity-60 text-white px-4 py-2 rounded-lg shadow"
-          >
-            <Download className="h-4 w-4" />
-            Exportar CSV
-          </button>
-
-          <button
-            onClick={clearAll}
+            onClick={resetAll}
             className="flex items-center gap-2 bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 px-4 py-2 rounded-lg shadow-sm"
           >
             <Trash2 className="h-4 w-4" />
@@ -432,94 +398,92 @@ export default function App() {
 
       {/* METRICS */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+        <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-100 border-l-4 border-l-emerald-500">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium text-slate-500">Total Reinscritos</p>
+              <h3 className="text-4xl font-bold text-slate-800">{stats.reenrolled}</h3>
+            </div>
+            <CheckCircle className="h-10 w-10 text-emerald-100" />
+          </div>
+          <p className="text-xs text-emerald-600 mt-2 font-medium">{stats.reenrolledPct}% del total (sin graduados)</p>
+        </div>
+
         <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-100 border-l-4 border-l-red-500">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-sm font-medium text-slate-500">No Inscritos</p>
-              <h3 className="text-4xl font-bold text-slate-800">{metrics.totalDropouts}</h3>
+              <p className="text-sm font-medium text-slate-500">Total Pérdida</p>
+              <h3 className="text-4xl font-bold text-slate-800">{stats.lost}</h3>
             </div>
             <AlertTriangle className="h-10 w-10 text-red-100" />
           </div>
-          <p className="text-xs text-red-500 mt-2 font-medium">Excluye graduados (L19)</p>
+          <p className="text-xs text-red-600 mt-2 font-medium">{stats.lostPct}% del total (sin graduados)</p>
         </div>
 
         <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-100 border-l-4 border-l-blue-500">
           <div className="flex items-center justify-between">
             <div>
               <p className="text-sm font-medium text-slate-500">Acción Requerida</p>
-              <h3 className="text-xl font-bold text-slate-800">
-                {Math.max(metrics.totalDropouts - contacted.size, 0)}
-              </h3>
+              <h3 className="text-2xl font-bold text-slate-800">{metrics.total - contacted.size}</h3>
             </div>
             <Phone className="h-10 w-10 text-blue-100" />
           </div>
-          <p className="text-xs text-slate-400 mt-2">Pendientes por llamar</p>
-        </div>
-
-        <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-100 border-l-4 border-l-emerald-500">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium text-slate-500">Gestión Realizada</p>
-              <h3 className="text-4xl font-bold text-slate-800">
-                {metrics.totalDropouts > 0
-                  ? Math.round((contacted.size / metrics.totalDropouts) * 100)
-                  : 0}
-                %
-              </h3>
-            </div>
-            <CheckCircle className="h-10 w-10 text-emerald-100" />
-          </div>
-          <p className="text-xs text-emerald-600 mt-2 font-medium">
-            {contacted.size} contactados
-          </p>
+          <p className="text-xs text-slate-400 mt-2">Pendientes por contactar</p>
         </div>
 
         <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-100 border-l-4 border-l-indigo-500">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-sm font-medium text-slate-500">Turno con más fugas</p>
-              <h3 className="text-lg font-bold text-slate-800 truncate">{metrics.worstShift}</h3>
+              <p className="text-sm font-medium text-slate-500">Horario con más fugas</p>
+              <h3 className="text-lg font-bold text-slate-800 truncate">{metrics.topHorario}</h3>
             </div>
             <Clock className="h-10 w-10 text-indigo-100" />
           </div>
-          <p className="text-xs text-indigo-600 mt-2 font-medium">Prioriza ese horario</p>
+          <p className="text-xs text-indigo-600 mt-2 font-medium">Prioriza este bloque</p>
         </div>
       </div>
 
       {/* CHARTS */}
-      {metrics.totalDropouts > 0 ? (
+      {metrics.total > 0 ? (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
           <div className="lg:col-span-2 bg-white p-6 rounded-xl shadow-sm border border-slate-100">
-            <h3 className="text-lg font-bold text-slate-800 mb-4">Fugas por Nivel</h3>
-            <div className="h-64 w-full">
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <h3 className="text-lg font-bold text-slate-800">Fugas por Nivel</h3>
+              <div className="text-xs text-slate-500">
+                Tip: haz click en una barra para filtrar la lista por ese nivel.
+              </div>
+            </div>
+
+            <div className="h-64 w-full mt-3">
               <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={metrics.chartDataLevel}>
+                <BarChart data={metrics.chartDataLevel} onClick={onClickLevelBar}>
                   <CartesianGrid strokeDasharray="3 3" vertical={false} />
                   <XAxis dataKey="name" tick={{ fontSize: 10 }} interval={0} />
                   <YAxis />
-                  <Tooltip />
-                  <Bar dataKey="count" fill="#2563eb" radius={[4, 4, 0, 0]} name="Estudiantes" />
+                  <Tooltip cursor={{ fill: "#f1f5f9" }} />
+                  <Bar dataKey="count" fill="#3b82f6" radius={[4, 4, 0, 0]} name="Estudiantes" />
                 </BarChart>
               </ResponsiveContainer>
             </div>
           </div>
 
           <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-100">
-            <h3 className="text-lg font-bold text-slate-800 mb-4">Deserción por Turno</h3>
+            <h3 className="text-lg font-bold text-slate-800 mb-4">Deserción por Horario</h3>
             <div className="h-64 w-full">
               <ResponsiveContainer width="100%" height="100%">
                 <PieChart>
                   <Pie
-                    data={metrics.chartDataShift}
+                    data={metrics.chartDataHorario}
                     cx="50%"
                     cy="50%"
                     innerRadius={60}
                     outerRadius={85}
-                    paddingAngle={5}
+                    paddingAngle={4}
                     dataKey="value"
+                    onClick={onClickPie}
                   >
-                    {metrics.chartDataShift.map((entry, idx) => (
-                      <Cell key={`cell-${idx}`} fill={COLORS[idx % COLORS.length]} />
+                    {metrics.chartDataHorario.map((entry, index) => (
+                      <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
                     ))}
                   </Pie>
                   <Tooltip />
@@ -527,6 +491,9 @@ export default function App() {
                 </PieChart>
               </ResponsiveContainer>
             </div>
+            <p className="text-xs text-slate-500 mt-2">
+              Tip: haz click en un segmento para filtrar por horario.
+            </p>
           </div>
         </div>
       ) : (
@@ -535,40 +502,72 @@ export default function App() {
             <FileText className="h-8 w-8 text-slate-400" />
           </div>
           <h3 className="text-lg font-medium text-slate-700">No hay datos para mostrar</h3>
-          <p className="text-slate-500 mb-4">Carga PDFs para comenzar.</p>
+          <p className="text-slate-500 mb-4">Carga los PDFs para comenzar.</p>
           <button onClick={() => setActiveTab("upload")} className="text-blue-600 font-semibold hover:underline">
             Ir a Cargar PDFs
           </button>
         </div>
       )}
 
-      {/* TABLE */}
+      {/* CRM TABLE */}
       <div className="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
-        <div className="p-6 border-b border-slate-100 flex flex-col md:flex-row justify-between items-center gap-4">
-          <h3 className="text-lg font-bold text-slate-800">Lista de Gestión (CRM)</h3>
+        <div className="p-6 border-b border-slate-100 flex flex-col gap-4">
+          <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-3">
+            <h3 className="text-lg font-bold text-slate-800">Lista de Gestión</h3>
+            <div className="text-xs text-slate-500">
+              Mostrando {filteredData.length} de {metrics.total}
+            </div>
+          </div>
 
-          <div className="flex flex-col sm:flex-row gap-3 w-full md:w-auto">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+            {/* Categoría */}
             <div className="relative">
               <select
-                value={selectedShift}
-                onChange={(e) => setSelectedShift(e.target.value)}
-                className="appearance-none bg-slate-50 border border-slate-200 text-slate-700 py-2 pl-4 pr-8 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 w-full sm:w-44"
+                value={selectedCategory}
+                onChange={(e) => setSelectedCategory(e.target.value)}
+                className="appearance-none bg-slate-50 border border-slate-200 text-slate-700 py-2 pl-4 pr-8 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-blue-500"
               >
-                <option value="All">Todos los Turnos</option>
-                <option value="Mañana">Mañana</option>
-                <option value="Tarde">Tarde</option>
-                <option value="Vespertino">Vespertino</option>
-                <option value="Noche">Noche</option>
-                <option value="Otro">Otro</option>
+                {filterOptions.categories.map((c) => (
+                  <option key={c} value={c}>{c === "All" ? "Todas las categorías" : c}</option>
+                ))}
               </select>
               <Filter className="absolute right-3 top-2.5 h-4 w-4 text-slate-400 pointer-events-none" />
             </div>
 
-            <div className="relative w-full sm:w-72">
+            {/* Nivel */}
+            <div className="relative">
+              <select
+                value={selectedLevel}
+                onChange={(e) => setSelectedLevel(e.target.value)}
+                className="appearance-none bg-slate-50 border border-slate-200 text-slate-700 py-2 pl-4 pr-8 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                {filterOptions.levels.map((l) => (
+                  <option key={l} value={l}>{l === "All" ? "Todos los niveles" : l}</option>
+                ))}
+              </select>
+              <Filter className="absolute right-3 top-2.5 h-4 w-4 text-slate-400 pointer-events-none" />
+            </div>
+
+            {/* Horario */}
+            <div className="relative">
+              <select
+                value={selectedHorario}
+                onChange={(e) => setSelectedHorario(e.target.value)}
+                className="appearance-none bg-slate-50 border border-slate-200 text-slate-700 py-2 pl-4 pr-8 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                {filterOptions.horarios.map((h) => (
+                  <option key={h} value={h}>{h === "All" ? "Todos los horarios" : h}</option>
+                ))}
+              </select>
+              <Filter className="absolute right-3 top-2.5 h-4 w-4 text-slate-400 pointer-events-none" />
+            </div>
+
+            {/* Buscar */}
+            <div className="relative">
               <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
               <input
                 type="text"
-                placeholder="Buscar por nombre o cédula..."
+                placeholder="Buscar (nombre, cédula, email, teléfono)…"
                 className="pl-10 pr-4 py-2 border border-slate-200 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-blue-500"
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
@@ -584,60 +583,88 @@ export default function App() {
                 <th className="p-4 font-semibold border-b border-slate-100">Estado</th>
                 <th className="p-4 font-semibold border-b border-slate-100">Estudiante</th>
                 <th className="p-4 font-semibold border-b border-slate-100">Cédula</th>
-                <th className="p-4 font-semibold border-b border-slate-100">Nivel (Anterior)</th>
-                <th className="p-4 font-semibold border-b border-slate-100">Horario (Anterior)</th>
+                <th className="p-4 font-semibold border-b border-slate-100">Categoría</th>
+                <th className="p-4 font-semibold border-b border-slate-100">Nivel</th>
+                <th className="p-4 font-semibold border-b border-slate-100">Horario</th>
+                <th className="p-4 font-semibold border-b border-slate-100">Email</th>
+                <th className="p-4 font-semibold border-b border-slate-100">Teléfono</th>
                 <th className="p-4 font-semibold border-b border-slate-100 text-right">Acción</th>
               </tr>
             </thead>
 
             <tbody className="text-sm text-slate-700 divide-y divide-slate-50">
-              {filteredData.length > 0 ? (
-                filteredData.map((s) => {
-                  const isDone = contacted.has(s.id);
-                  return (
-                    <tr key={s.id} className={`hover:bg-slate-50 ${isDone ? "bg-emerald-50/30" : ""}`}>
-                      <td className="p-4">
-                        {isDone ? (
-                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
-                            <CheckCircle className="h-3 w-3" /> Contactado
-                          </span>
-                        ) : (
-                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800">
-                            <XCircle className="h-3 w-3" /> Pendiente
-                          </span>
-                        )}
-                      </td>
-
-                      <td className="p-4 font-medium text-slate-900">{s.name}</td>
-                      <td className="p-4 font-mono text-xs">{s.id}</td>
-
-                      <td className="p-4">
-                        <span className="px-2 py-1 bg-slate-100 rounded text-xs font-bold text-slate-600">
-                          {s.level}
+              {filteredData.length ? (
+                filteredData.map((s) => (
+                  <tr
+                    key={s.id}
+                    className={`hover:bg-slate-50 transition-colors ${
+                      contacted.has(s.id) ? "bg-emerald-50/30" : ""
+                    }`}
+                  >
+                    <td className="p-4">
+                      {contacted.has(s.id) ? (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                          <CheckCircle className="h-3 w-3" />
+                          Contactado
                         </span>
-                      </td>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800">
+                          <XCircle className="h-3 w-3" />
+                          Pendiente
+                        </span>
+                      )}
+                    </td>
 
-                      <td className="p-4 text-slate-500">{s.schedule}</td>
+                    <td className="p-4 font-medium text-slate-900">{s.name}</td>
+                    <td className="p-4 font-mono text-xs">{s.id}</td>
+                    <td className="p-4">{s.category}</td>
 
-                      <td className="p-4 text-right">
-                        <button
-                          onClick={() => toggleContact(s.id)}
-                          className={`p-2 rounded-lg transition-colors ${
-                            isDone
-                              ? "bg-slate-200 text-slate-500 hover:bg-slate-300"
-                              : "bg-blue-600 text-white hover:bg-blue-700 shadow-sm"
-                          }`}
-                          title={isDone ? "Marcar como pendiente" : "Marcar como contactado"}
-                        >
-                          <Phone className="h-4 w-4" />
-                        </button>
-                      </td>
-                    </tr>
-                  );
-                })
+                    <td className="p-4">
+                      <span className="px-2 py-1 bg-slate-100 rounded text-xs font-bold text-slate-600">
+                        {s.levelNorm}
+                      </span>
+                    </td>
+
+                    <td className="p-4 text-slate-600">{s.scheduleBlock}</td>
+
+                    <td className="p-4 text-slate-600">
+                      {s.email ? (
+                        <a className="text-blue-600 hover:underline" href={`mailto:${s.email}`}>
+                          {s.email}
+                        </a>
+                      ) : (
+                        <span className="text-slate-400">N/A</span>
+                      )}
+                    </td>
+
+                    <td className="p-4 text-slate-600">
+                      {s.phone ? (
+                        <a className="text-blue-600 hover:underline" href={`tel:${s.phone}`}>
+                          {s.phone}
+                        </a>
+                      ) : (
+                        <span className="text-slate-400">N/A</span>
+                      )}
+                    </td>
+
+                    <td className="p-4 text-right">
+                      <button
+                        onClick={() => toggleContact(s.id)}
+                        className={`p-2 rounded-lg transition-colors ${
+                          contacted.has(s.id)
+                            ? "bg-slate-200 text-slate-500 hover:bg-slate-300"
+                            : "bg-blue-600 text-white hover:bg-blue-700 shadow-sm"
+                        }`}
+                        title={contacted.has(s.id) ? "Marcar como pendiente" : "Marcar como contactado"}
+                      >
+                        <Phone className="h-4 w-4" />
+                      </button>
+                    </td>
+                  </tr>
+                ))
               ) : (
                 <tr>
-                  <td colSpan="6" className="p-8 text-center text-slate-400">
+                  <td colSpan="9" className="p-8 text-center text-slate-400">
                     No se encontraron estudiantes con los filtros actuales.
                   </td>
                 </tr>
@@ -647,12 +674,12 @@ export default function App() {
         </div>
 
         <div className="p-4 border-t border-slate-100 bg-slate-50 text-xs text-slate-500 flex justify-between items-center">
-          <span>
-            Mostrando {filteredData.length} de {metrics.totalDropouts} estudiantes detectados
-          </span>
-          <span>Continuidad CEVAZ v1.0</span>
+          <span>Continuidad</span>
+          <span>{new Date().getFullYear()}</span>
         </div>
       </div>
     </div>
   );
-}
+};
+
+export default DashboardContinuidad;
