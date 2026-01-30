@@ -72,3 +72,4 @@ export function parseCevazListFromPdfText(text) {
 
   return students;
 }
+
