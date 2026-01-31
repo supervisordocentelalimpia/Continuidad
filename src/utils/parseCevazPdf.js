@@ -34,29 +34,52 @@ const normalizeCategory = (raw, fileName = "") => {
   return raw ? raw.trim() : "Otra";
 };
 
+const inferStartMeridiem = (startHour, endMer) => {
+  // Reglas basadas en tus bloques reales:
+  // - Si termina AM => empieza AM
+  // - Si termina PM:
+  //    - 8,9,10,11 => empieza AM (caso 10:30 A 12:00 PM)
+  //    - 1..7 => empieza PM
+  if (endMer === "AM") return "AM";
+  if (startHour >= 8 && startHour <= 11) return "AM";
+  return "PM";
+};
+
 const normalizeHorario = (raw) => {
   if (!raw) return "N/A";
 
   const afterSlash = raw.includes("/") ? raw.split("/").pop().trim() : raw.trim();
-  const cleaned = afterSlash.replace(/\s+/g, " ").trim();
 
-  const m = cleaned.match(
-    /(\d{1,2}:\d{2})\s*(AM|PM)?\s*(?:A|TO|-)\s*(\d{1,2}:\d{2})\s*(AM|PM)/i
+  // Captura:
+  // 8:30 A 10:00 AM
+  // 10:30 A 12:00 PM
+  // 8:00 AM - 10:40 AM
+  const m = afterSlash.match(
+    /(\d{1,2}):(\d{2})\s*(AM|PM)?\s*(?:A|TO|-)\s*(\d{1,2}):(\d{2})\s*(AM|PM)/i
   );
 
   if (!m) {
-    const k = normKey(cleaned);
+    const k = normKey(afterSlash);
     const exact = HORARIO_BLOQUES.find((b) => normKey(b) === k);
-    return exact || cleaned;
+    return exact || afterSlash;
   }
 
-  const start = m[1];
-  const startMer = (m[2] || m[4]).toUpperCase();
-  const end = m[3];
-  const endMer = m[4].toUpperCase();
+  const sh = parseInt(m[1], 10);
+  const sm = m[2];
+  let startMer = (m[3] || "").toUpperCase();
 
-  const candidate = `${start} ${startMer} - ${end} ${endMer}`;
-  const mapped = HORARIO_BLOQUES.find((b) => normKey(b) === normKey(candidate));
+  const eh = parseInt(m[4], 10);
+  const em = m[5];
+  const endMer = m[6].toUpperCase();
+
+  if (!startMer) {
+    startMer = inferStartMeridiem(sh, endMer);
+  }
+
+  const candidate = `${sh}:${sm} ${startMer} - ${eh}:${em} ${endMer}`;
+  const cKey = normKey(candidate);
+  const mapped = HORARIO_BLOQUES.find((b) => normKey(b) === cKey);
+
   return mapped || candidate;
 };
 
@@ -65,64 +88,95 @@ const extractMetaFromLine = (line, meta, fileName) => {
     const raw = line.split(":").slice(1).join(":").trim();
     meta.categoryRaw = raw;
     meta.category = normalizeCategory(raw, fileName);
+    return;
   }
+
   if (line.startsWith("Nivel:")) {
     const raw = line.split(":").slice(1).join(":").trim();
     meta.levelRaw = raw;
     meta.levelNorm = normalizeLevel(raw);
+    return;
   }
+
   if (line.startsWith("Horario:")) {
     const raw = line.split(":").slice(1).join(":").trim();
     meta.scheduleRaw = raw;
     meta.scheduleBlock = normalizeHorario(raw);
+    return;
+  }
+
+  // Extra: útil para el futuro (cursos/alertas por curso), no afecta tu UI actual
+  if (/^SAL[ÓO]N:/i.test(line)) {
+    meta.salonRaw = line;
+    const m = line.match(/SAL[ÓO]N:\s*([A-Z0-9]+).*CURSO\s*ID:\s*(\d+)/i);
+    if (m) {
+      meta.salon = m[1];
+      meta.courseId = m[2];
+    }
   }
 };
 
-// Extrae una cédula robusta (acepta puntos/guiones y la normaliza a dígitos)
-const extractCedula = (text) => {
-  // Busca un bloque tipo "33.374.557" o "33374557" o "33-374-557"
-  const m = text.match(/\b\d[\d.\s-]{3,}\d\b/);
-  if (!m) return "";
-  const digits = m[0].replace(/[^\d]/g, "");
-  if (digits.length < 4 || digits.length > 12) return "";
-  return digits;
+const shouldSkipLine = (line) => {
+  const up = line.toUpperCase();
+
+  if (up.includes("CENTRO VENEZOLANO")) return true;
+  if (up.includes("LISTA DE ALUMNOS")) return true;
+  if (up.startsWith("R.I.F")) return true;
+  if (up.startsWith("SEDE:")) return true;
+  if (up.startsWith("FECHA:")) return true;
+  if (up.startsWith("PERIODO:")) return true;
+  if (up.startsWith("SALÓN:") || up.startsWith("SALON:")) return true;
+
+  // Cabecera de columnas
+  if (up.includes("APELLIDOS") && up.includes("EMAIL")) return true;
+
+  return false;
 };
 
 const parseStudentLine = (line, meta) => {
-  const s = (line || "").replace(/\s+/g, " ").trim();
-  if (!s) return null;
+  // ✅ REGLA CLAVE: una fila real de alumno empieza con:
+  // [#] [CEDULA] [NOMBRES...]
+  // Esto mata los “fantasmas” tipo "Salón: C5 Curso ID: 64161"
+  const m = line.match(/^(\d+)\s+(\d{6,12})\s+(.+)$/);
+  if (!m) return null;
 
-  const up = s.toUpperCase();
-  if (up.includes("APELLIDOS") && up.includes("EMAIL")) return null;
+  const id = m[2];
+  const rest = m[3].trim();
 
-  const id = extractCedula(s);
-  if (!id) return null;
+  const tokens = rest.split(/\s+/);
 
-  // Teléfono: tomar el último bloque numérico largo (opcional)
-  const mPhone = s.match(/(\+?\d[\d\s-]{6,}\d)(?!.*\d)/);
-  const phoneRaw = mPhone ? mPhone[1] : "";
-  const phone = phoneRaw ? phoneRaw.replace(/[^\d+]/g, "") : "";
+  // Email: si existe, es el primer token con "@". No lo validamos estricto (a ti no te importa perfecto).
+  let email = "";
+  let emailIdx = -1;
+  for (let i = 0; i < tokens.length; i++) {
+    if (tokens[i].includes("@")) {
+      email = tokens[i];
+      emailIdx = i;
+      break;
+    }
+  }
 
-  // Email: opcional; si está mal escrito no bloquea nada
-  const mEmail = s.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
-  const email = mEmail ? mEmail[0] : "";
+  let nameTokens = tokens;
+  let afterTokens = [];
 
-  // Nombre: remover índice, cédula, email, teléfono
-  let namePart = s;
+  if (emailIdx >= 0) {
+    nameTokens = tokens.slice(0, emailIdx);
+    afterTokens = tokens.slice(emailIdx + 1);
+  } else {
+    // Si no hay email, intentamos encontrar teléfono al final
+    afterTokens = [];
+  }
 
-  // Quita índice inicial "1 " si existe
-  namePart = namePart.replace(/^\d+\s+/, "");
-
-  // Quita la cédula (como dígitos o con puntos)
-  // Quitamos ambos: digits y la versión con separadores si coincide
-  namePart = namePart.replace(id, "").trim();
-
-  if (email) namePart = namePart.replace(email, "").trim();
-  if (phoneRaw) namePart = namePart.replace(phoneRaw, "").trim();
-
-  // Quita basura doble-espacio
-  const name = namePart.replace(/\s{2,}/g, " ").trim();
+  const name = nameTokens.join(" ").replace(/\s{2,}/g, " ").trim();
   if (!name) return null;
+
+  // Teléfono: cualquier cadena larga numérica (con + opcional) después del email
+  let phone = "";
+  const afterStr = afterTokens.join(" ");
+  const phoneMatch = afterStr.match(/(\+?\d[\d\s-]{6,}\d)/);
+  if (phoneMatch) {
+    phone = phoneMatch[1].replace(/[^\d+]/g, "");
+  }
 
   return {
     id,
@@ -130,10 +184,15 @@ const parseStudentLine = (line, meta) => {
     email,
     phone,
     category: meta.category || "Otra",
+    categoryRaw: meta.categoryRaw || "",
     level: meta.levelRaw || "N/A",
     levelNorm: meta.levelNorm || "N/A",
     schedule: meta.scheduleRaw || "N/A",
     scheduleBlock: meta.scheduleBlock || "N/A",
+
+    // extra (no rompe nada)
+    salon: meta.salon || "",
+    courseId: meta.courseId || "",
   };
 };
 
@@ -152,14 +211,20 @@ export async function parseCevazPdf(file) {
     levelNorm: "",
     scheduleRaw: "",
     scheduleBlock: "",
+    salonRaw: "",
+    salon: "",
+    courseId: "",
   };
 
   const students = [];
 
   for (const line of lines) {
+    if (shouldSkipLine(line)) continue;
+
     extractMetaFromLine(line, meta, file?.name);
-    const st = parseStudentLine(line, meta);
-    if (st && st.id) students.push(st);
+
+    const s = parseStudentLine(line, meta);
+    if (s && s.id) students.push(s);
   }
 
   return students;
