@@ -37,13 +37,9 @@ const normalizeCategory = (raw, fileName = "") => {
 const normalizeHorario = (raw) => {
   if (!raw) return "N/A";
 
-  // Ej: "TUESDAY TO FRIDAY / 8:30 A 10:00 AM"
   const afterSlash = raw.includes("/") ? raw.split("/").pop().trim() : raw.trim();
-
-  // Normalizar separadores raros (muchos espacios, guiones, etc.)
   const cleaned = afterSlash.replace(/\s+/g, " ").trim();
 
-  // Capturar: 8:30 A 10:00 AM | 8:00 AM - 10:40 AM
   const m = cleaned.match(
     /(\d{1,2}:\d{2})\s*(AM|PM)?\s*(?:A|TO|-)\s*(\d{1,2}:\d{2})\s*(AM|PM)/i
   );
@@ -55,13 +51,12 @@ const normalizeHorario = (raw) => {
   }
 
   const start = m[1];
-  const startMer = (m[2] || m[4]).toUpperCase(); // si no trae AM/PM al inicio, asumir el del final
+  const startMer = (m[2] || m[4]).toUpperCase();
   const end = m[3];
   const endMer = m[4].toUpperCase();
 
   const candidate = `${start} ${startMer} - ${end} ${endMer}`;
-  const cKey = normKey(candidate);
-  const mapped = HORARIO_BLOQUES.find((b) => normKey(b) === cKey);
+  const mapped = HORARIO_BLOQUES.find((b) => normKey(b) === normKey(candidate));
   return mapped || candidate;
 };
 
@@ -83,41 +78,50 @@ const extractMetaFromLine = (line, meta, fileName) => {
   }
 };
 
+// Extrae una cédula robusta (acepta puntos/guiones y la normaliza a dígitos)
+const extractCedula = (text) => {
+  // Busca un bloque tipo "33.374.557" o "33374557" o "33-374-557"
+  const m = text.match(/\b\d[\d.\s-]{3,}\d\b/);
+  if (!m) return "";
+  const digits = m[0].replace(/[^\d]/g, "");
+  if (digits.length < 4 || digits.length > 12) return "";
+  return digits;
+};
+
 const parseStudentLine = (line, meta) => {
-  // Compactar espacios
   const s = (line || "").replace(/\s+/g, " ").trim();
   if (!s) return null;
 
-  // Quitar header típico
   const up = s.toUpperCase();
   if (up.includes("APELLIDOS") && up.includes("EMAIL")) return null;
 
-  // 1) ID: normalmente viene así: "1  33193783  APELLIDO ..."
-  let id = "";
-  const mId = s.match(/^\d+\s+(\d{4,12})\b/);
-  if (mId) id = mId[1];
-  else {
-    const anyId = s.match(/\b\d{6,12}\b/);
-    if (anyId) id = anyId[0];
-  }
+  const id = extractCedula(s);
   if (!id) return null;
 
-  // 2) Teléfono: último bloque numérico largo al final
-  const mPhone = s.match(/(\+?\d[\d\s-]{6,}\d)\s*$/);
+  // Teléfono: tomar el último bloque numérico largo (opcional)
+  const mPhone = s.match(/(\+?\d[\d\s-]{6,}\d)(?!.*\d)/);
   const phoneRaw = mPhone ? mPhone[1] : "";
   const phone = phoneRaw ? phoneRaw.replace(/[^\d+]/g, "") : "";
 
-  // 3) Email: opcional (si existe, lo guardamos; si es malo, no bloquea parsing)
+  // Email: opcional; si está mal escrito no bloquea nada
   const mEmail = s.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
   const email = mEmail ? mEmail[0] : "";
 
-  // 4) Nombre: lo que queda tras remover índice, id, email, teléfono
-  let namePart = s.replace(/^\d+\s+/, "");       // quita índice
-  namePart = namePart.replace(id, "").trim();   // quita cédula
+  // Nombre: remover índice, cédula, email, teléfono
+  let namePart = s;
+
+  // Quita índice inicial "1 " si existe
+  namePart = namePart.replace(/^\d+\s+/, "");
+
+  // Quita la cédula (como dígitos o con puntos)
+  // Quitamos ambos: digits y la versión con separadores si coincide
+  namePart = namePart.replace(id, "").trim();
+
   if (email) namePart = namePart.replace(email, "").trim();
   if (phoneRaw) namePart = namePart.replace(phoneRaw, "").trim();
-  const name = namePart.replace(/\s{2,}/g, " ").trim();
 
+  // Quita basura doble-espacio
+  const name = namePart.replace(/\s{2,}/g, " ").trim();
   if (!name) return null;
 
   return {
@@ -126,7 +130,6 @@ const parseStudentLine = (line, meta) => {
     email,
     phone,
     category: meta.category || "Otra",
-    categoryRaw: meta.categoryRaw || "",
     level: meta.levelRaw || "N/A",
     levelNorm: meta.levelNorm || "N/A",
     schedule: meta.scheduleRaw || "N/A",
@@ -155,7 +158,6 @@ export async function parseCevazPdf(file) {
 
   for (const line of lines) {
     extractMetaFromLine(line, meta, file?.name);
-
     const st = parseStudentLine(line, meta);
     if (st && st.id) students.push(st);
   }
