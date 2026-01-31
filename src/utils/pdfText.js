@@ -1,17 +1,27 @@
-import * as pdfjsLib from "pdfjs-dist";
-import workerSrc from "pdfjs-dist/build/pdf.worker.min?url";
+// src/utils/pdfText.js
+import { getDocument, GlobalWorkerOptions } from "pdfjs-dist/legacy/build/pdf.mjs";
+import workerSrc from "pdfjs-dist/legacy/build/pdf.worker.min.mjs?url";
 
-pdfjsLib.GlobalWorkerOptions.workerSrc = workerSrc;
+GlobalWorkerOptions.workerSrc = workerSrc;
 
+// Extrae texto de un PDF (texto real; si es escaneado/imagen, quedará vacío)
 export async function extractTextFromPdf(file) {
-  const data = new Uint8Array(await file.arrayBuffer());
-  const pdf = await pdfjsLib.getDocument({ data }).promise;
+  if (!file) throw new Error("No PDF provided");
 
-  let fullText = "";
-  for (let p = 1; p <= pdf.numPages; p++) {
-    const page = await pdf.getPage(p);
+  const buffer = await file.arrayBuffer();
+  const pdf = await getDocument({ data: buffer }).promise;
+
+  let out = "";
+  for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+    const page = await pdf.getPage(pageNum);
     const content = await page.getTextContent();
-    fullText += content.items.map((it) => it.str || "").join(" ") + "\n";
+
+    const strings = content.items
+      .map((it) => (typeof it?.str === "string" ? it.str : ""))
+      .filter(Boolean);
+
+    out += strings.join(" ") + "\n";
   }
-  return fullText;
+
+  return out;
 }
