@@ -80,6 +80,9 @@ const DashboardContinuidad = () => {
         parseCevazPdf(pdfOld),
         parseCevazPdf(pdfNew),
       ]);
+if (!oldList.length || !newList.length) {
+  throw new Error("No se pudo extraer texto/alumnos de uno de los PDFs (posible PDF escaneado o formato distinto).");
+}
 
       // Normalizar duplicados por cédula (por si aparece repetido en el PDF)
       const uniqById = (arr) => {
