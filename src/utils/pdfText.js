@@ -1,15 +1,17 @@
 // src/utils/pdfText.js
-import { getDocument, GlobalWorkerOptions } from "pdfjs-dist/legacy/build/pdf.mjs";
+import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf";
 import workerSrc from "pdfjs-dist/legacy/build/pdf.worker.min.mjs?url";
 
-GlobalWorkerOptions.workerSrc = workerSrc;
+pdfjsLib.GlobalWorkerOptions.workerSrc = workerSrc;
 
-// Named export (esto evita tu error del build)
+/**
+ * Extrae texto del PDF reconstruyendo líneas (crítico para que el parser funcione bien).
+ */
 export async function extractTextFromPdf(file) {
-  if (!file) throw new Error("No se recibió el PDF.");
+  if (!file) return "";
 
-  const buffer = await file.arrayBuffer();
-  const pdf = await getDocument({ data: buffer }).promise;
+  const data = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data }).promise;
 
   const allLines = [];
 
@@ -17,55 +19,56 @@ export async function extractTextFromPdf(file) {
     const page = await pdf.getPage(pageNum);
     const content = await page.getTextContent();
 
+    // Items: { str, transform, width, ... }
     const items = (content.items || [])
       .map((it) => {
-        const str = (it?.str || "").trim();
-        const t = it?.transform || [];
-        const x = typeof t[4] === "number" ? t[4] : 0;
-        const y = typeof t[5] === "number" ? t[5] : 0;
-        return { str, x, y };
+        const str = (it.str || "").trimEnd();
+        const x = it.transform?.[4] ?? 0;
+        const y = it.transform?.[5] ?? 0;
+        const w = it.width ?? 0;
+        return { str, x, y, w };
       })
-      .filter((it) => it.str);
+      .filter((it) => it.str && it.str.trim().length > 0);
 
-    // Orden: arriba->abajo por Y, y dentro de fila izquierda->derecha por X
-    items.sort((a, b) => {
-      const dy = b.y - a.y;
-      if (Math.abs(dy) > 2) return dy;
-      return a.x - b.x;
-    });
-
-    // Agrupar por filas según Y
-    const lines = [];
-    let current = [];
-    let currentY = null;
-
-    const Y_TOL = 2;
-
+    // Agrupar por "línea" usando Y (redondeado)
+    const byY = new Map();
     for (const it of items) {
-      if (currentY === null) {
-        currentY = it.y;
-        current.push(it);
-        continue;
-      }
-
-      if (Math.abs(it.y - currentY) <= Y_TOL) {
-        current.push(it);
-      } else {
-        current.sort((a, b) => a.x - b.x);
-        lines.push(current.map((z) => z.str).join(" ").replace(/\s+/g, " ").trim());
-
-        current = [it];
-        currentY = it.y;
-      }
+      const yKey = Math.round(it.y); // suficiente para PDFs como los tuyos
+      if (!byY.has(yKey)) byY.set(yKey, []);
+      byY.get(yKey).push(it);
     }
 
-    if (current.length) {
-      current.sort((a, b) => a.x - b.x);
-      lines.push(current.map((z) => z.str).join(" ").replace(/\s+/g, " ").trim());
+    // Orden: de arriba hacia abajo
+    const yKeys = Array.from(byY.keys()).sort((a, b) => b - a);
+
+    for (const yKey of yKeys) {
+      const lineItems = byY.get(yKey).sort((a, b) => a.x - b.x);
+
+      let line = "";
+      let prevX = null;
+      let prevW = 0;
+
+      for (const it of lineItems) {
+        const gap =
+          prevX === null ? 999 : it.x - (prevX + (prevW || 0));
+
+        // Si hay espacio visual, metemos un espacio; si no, pegamos (emails/números)
+        if (line && gap > 2) line += " ";
+
+        line += it.str;
+
+        prevX = it.x;
+        prevW = it.w;
+      }
+
+      line = line.replace(/\s{2,}/g, " ").trim();
+      if (line) allLines.push(line);
     }
 
-    for (const l of lines) if (l) allLines.push(l);
+    allLines.push(""); // separador entre páginas
   }
 
   return allLines.join("\n");
 }
+
+export default extractTextFromPdf;
