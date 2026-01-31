@@ -1,4 +1,5 @@
-import React, { useEffect, useMemo, useState } from "react";
+// src/App.jsx
+import React, { useMemo, useState } from "react";
 import * as XLSX from "xlsx";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -80,11 +81,16 @@ const DashboardContinuidad = () => {
         parseCevazPdf(pdfOld),
         parseCevazPdf(pdfNew),
       ]);
-if (!oldList.length || !newList.length) {
-  throw new Error("No se pudo extraer texto/alumnos de uno de los PDFs (posible PDF escaneado o formato distinto).");
-}
 
-      // Normalizar duplicados por cédula (por si aparece repetido en el PDF)
+      if (!oldList.length || !newList.length) {
+        throw new Error(
+          `No se pudo extraer alumnos de uno de los PDFs. ` +
+          `Old=${oldList.length}, New=${newList.length}. ` +
+          `Posible PDF escaneado o formato distinto.`
+        );
+      }
+
+      // Normalizar duplicados por cédula
       const uniqById = (arr) => {
         const map = new Map();
         for (const s of arr) {
@@ -124,7 +130,10 @@ if (!oldList.length || !newList.length) {
       setActiveTab("dashboard");
     } catch (e) {
       console.error(e);
-      setErrorMsg("No pude leer los PDFs. Si el PDF es escaneado (imagen), no se puede extraer texto.");
+      setErrorMsg(
+        e?.message ||
+        "No pude leer los PDFs. Si el PDF es escaneado (imagen), no se puede extraer texto."
+      );
     } finally {
       setLoading(false);
     }
@@ -143,7 +152,6 @@ if (!oldList.length || !newList.length) {
     const lvls = Array.from(new Set(dropouts.map((s) => s.levelNorm).filter(Boolean))).sort();
     const hrs = Array.from(new Set(dropouts.map((s) => s.scheduleBlock).filter(Boolean)));
 
-    // Ordenar horarios: primero los bloques conocidos, luego lo demás
     const known = __HORARIO_BLOQUES__ || [];
     const knownSet = new Set(known);
     const ordered = [
@@ -211,15 +219,13 @@ if (!oldList.length || !newList.length) {
     return { total, chartDataLevel, chartDataHorario, topHorario };
   }, [dropouts]);
 
-  // Click en gráfica => filtra tabla
   const onClickLevelBar = (e) => {
     const label = e?.activeLabel;
     if (!label) return;
     setSelectedLevel(label);
-    // bajar al CRM mentalmente: no hacemos scroll automático para no pelear con móvil
   };
 
-  const onClickPie = (data, index) => {
+  const onClickPie = (data) => {
     const name = data?.name;
     if (!name) return;
     setSelectedHorario(name);
@@ -257,7 +263,7 @@ if (!oldList.length || !newList.length) {
             Continuidad - Cargar PDFs
           </h1>
           <p className="text-slate-500 text-sm mt-1">
-            Los PDFs se procesan localmente en tu navegador. No se guardan en GitHub.
+            Los PDFs se procesan localmente en tu navegador. No se guardan.
           </p>
         </header>
 
@@ -409,7 +415,9 @@ if (!oldList.length || !newList.length) {
             </div>
             <CheckCircle className="h-10 w-10 text-emerald-100" />
           </div>
-          <p className="text-xs text-emerald-600 mt-2 font-medium">{stats.reenrolledPct}% del total (sin graduados)</p>
+          <p className="text-xs text-emerald-600 mt-2 font-medium">
+            {stats.reenrolledPct}% del total (sin graduados)
+          </p>
         </div>
 
         <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-100 border-l-4 border-l-red-500">
@@ -420,7 +428,9 @@ if (!oldList.length || !newList.length) {
             </div>
             <AlertTriangle className="h-10 w-10 text-red-100" />
           </div>
-          <p className="text-xs text-red-600 mt-2 font-medium">{stats.lostPct}% del total (sin graduados)</p>
+          <p className="text-xs text-red-600 mt-2 font-medium">
+            {stats.lostPct}% del total (sin graduados)
+          </p>
         </div>
 
         <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-100 border-l-4 border-l-blue-500">
@@ -523,7 +533,6 @@ if (!oldList.length || !newList.length) {
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-            {/* Categoría */}
             <div className="relative">
               <select
                 value={selectedCategory}
@@ -537,7 +546,6 @@ if (!oldList.length || !newList.length) {
               <Filter className="absolute right-3 top-2.5 h-4 w-4 text-slate-400 pointer-events-none" />
             </div>
 
-            {/* Nivel */}
             <div className="relative">
               <select
                 value={selectedLevel}
@@ -551,7 +559,6 @@ if (!oldList.length || !newList.length) {
               <Filter className="absolute right-3 top-2.5 h-4 w-4 text-slate-400 pointer-events-none" />
             </div>
 
-            {/* Horario */}
             <div className="relative">
               <select
                 value={selectedHorario}
@@ -565,7 +572,6 @@ if (!oldList.length || !newList.length) {
               <Filter className="absolute right-3 top-2.5 h-4 w-4 text-slate-400 pointer-events-none" />
             </div>
 
-            {/* Buscar */}
             <div className="relative">
               <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
               <input
