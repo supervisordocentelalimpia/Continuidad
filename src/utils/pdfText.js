@@ -4,7 +4,7 @@ import workerSrc from "pdfjs-dist/legacy/build/pdf.worker.min.mjs?url";
 
 GlobalWorkerOptions.workerSrc = workerSrc;
 
-// Reconstruye líneas agrupando por coordenada Y (fila) y ordenando por X (columna)
+// Named export (esto evita tu error del build)
 export async function extractTextFromPdf(file) {
   if (!file) throw new Error("No se recibió el PDF.");
 
@@ -27,19 +27,20 @@ export async function extractTextFromPdf(file) {
       })
       .filter((it) => it.str);
 
-    // Orden: de arriba hacia abajo, y dentro de cada fila de izquierda a derecha
+    // Orden: arriba->abajo por Y, y dentro de fila izquierda->derecha por X
     items.sort((a, b) => {
       const dy = b.y - a.y;
       if (Math.abs(dy) > 2) return dy;
       return a.x - b.x;
     });
 
-    // Agrupar por filas (y similar)
+    // Agrupar por filas según Y
     const lines = [];
     let current = [];
     let currentY = null;
 
-    const Y_TOL = 2; // tolerancia de "misma fila"
+    const Y_TOL = 2;
+
     for (const it of items) {
       if (currentY === null) {
         currentY = it.y;
@@ -50,26 +51,20 @@ export async function extractTextFromPdf(file) {
       if (Math.abs(it.y - currentY) <= Y_TOL) {
         current.push(it);
       } else {
-        // cerrar línea anterior
         current.sort((a, b) => a.x - b.x);
         lines.push(current.map((z) => z.str).join(" ").replace(/\s+/g, " ").trim());
 
-        // nueva línea
         current = [it];
         currentY = it.y;
       }
     }
 
-    // última línea
     if (current.length) {
       current.sort((a, b) => a.x - b.x);
       lines.push(current.map((z) => z.str).join(" ").replace(/\s+/g, " ").trim());
     }
 
-    // guardar líneas de la página
-    for (const l of lines) {
-      if (l) allLines.push(l);
-    }
+    for (const l of lines) if (l) allLines.push(l);
   }
 
   return allLines.join("\n");
