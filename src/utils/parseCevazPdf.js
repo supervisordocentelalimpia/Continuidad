@@ -1,3 +1,4 @@
+// src/utils/parseCevazPdf.js
 import { extractTextFromPdf } from "./pdfText";
 
 const HORARIO_BLOQUES = [
@@ -36,19 +37,21 @@ const normalizeCategory = (raw, fileName = "") => {
 const normalizeHorario = (raw) => {
   if (!raw) return "N/A";
 
-  // si viene con días tipo: "TUESDAY TO FRIDAY / 8:30 A 10:00 AM"
+  // Ej: "TUESDAY TO FRIDAY / 8:30 A 10:00 AM"
   const afterSlash = raw.includes("/") ? raw.split("/").pop().trim() : raw.trim();
 
-  // Intentar capturar: 8:30 A 10:00 AM  |  8:00 AM - 10:40 AM
-  const m = afterSlash.match(
+  // Normalizar separadores raros (muchos espacios, guiones, etc.)
+  const cleaned = afterSlash.replace(/\s+/g, " ").trim();
+
+  // Capturar: 8:30 A 10:00 AM | 8:00 AM - 10:40 AM
+  const m = cleaned.match(
     /(\d{1,2}:\d{2})\s*(AM|PM)?\s*(?:A|TO|-)\s*(\d{1,2}:\d{2})\s*(AM|PM)/i
   );
 
   if (!m) {
-    // fallback: si coincide exacto con alguno
-    const k = normKey(afterSlash);
+    const k = normKey(cleaned);
     const exact = HORARIO_BLOQUES.find((b) => normKey(b) === k);
-    return exact || afterSlash;
+    return exact || cleaned;
   }
 
   const start = m[1];
@@ -57,8 +60,6 @@ const normalizeHorario = (raw) => {
   const endMer = m[4].toUpperCase();
 
   const candidate = `${start} ${startMer} - ${end} ${endMer}`;
-
-  // mapear al bloque “oficial” si existe
   const cKey = normKey(candidate);
   const mapped = HORARIO_BLOQUES.find((b) => normKey(b) === cKey);
   return mapped || candidate;
@@ -83,38 +84,40 @@ const extractMetaFromLine = (line, meta, fileName) => {
 };
 
 const parseStudentLine = (line, meta) => {
-  // Requisito mínimo: índice + cédula + nombre
-  if (!/^\d+\s+\d{4,12}\s+/.test(line)) return null;
+  // Compactar espacios
+  const s = (line || "").replace(/\s+/g, " ").trim();
+  if (!s) return null;
 
-  // 1) Teléfono al final (si existe)
-  const phoneMatch = line.match(/(\+?\d[\d\s-]{6,}\d)\s*$/);
-  const phoneRaw = phoneMatch ? phoneMatch[1] : "";
+  // Quitar header típico
+  const up = s.toUpperCase();
+  if (up.includes("APELLIDOS") && up.includes("EMAIL")) return null;
+
+  // 1) ID: normalmente viene así: "1  33193783  APELLIDO ..."
+  let id = "";
+  const mId = s.match(/^\d+\s+(\d{4,12})\b/);
+  if (mId) id = mId[1];
+  else {
+    const anyId = s.match(/\b\d{6,12}\b/);
+    if (anyId) id = anyId[0];
+  }
+  if (!id) return null;
+
+  // 2) Teléfono: último bloque numérico largo al final
+  const mPhone = s.match(/(\+?\d[\d\s-]{6,}\d)\s*$/);
+  const phoneRaw = mPhone ? mPhone[1] : "";
   const phone = phoneRaw ? phoneRaw.replace(/[^\d+]/g, "") : "";
 
-  // 2) Quitar teléfono del final
-  let rest = phoneMatch ? line.slice(0, phoneMatch.index).trim() : line.trim();
+  // 3) Email: opcional (si existe, lo guardamos; si es malo, no bloquea parsing)
+  const mEmail = s.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  const email = mEmail ? mEmail[0] : "";
 
-  // 3) Quitar índice "#"
-  rest = rest.replace(/^\d+\s+/, "").trim();
+  // 4) Nombre: lo que queda tras remover índice, id, email, teléfono
+  let namePart = s.replace(/^\d+\s+/, "");       // quita índice
+  namePart = namePart.replace(id, "").trim();   // quita cédula
+  if (email) namePart = namePart.replace(email, "").trim();
+  if (phoneRaw) namePart = namePart.replace(phoneRaw, "").trim();
+  const name = namePart.replace(/\s{2,}/g, " ").trim();
 
-  // 4) Cédula
-  const idMatch = rest.match(/\b\d{4,12}\b/);
-  if (!idMatch) return null;
-  const id = idMatch[0];
-
-  // 5) Quitar cédula
-  rest = rest.replace(new RegExp(`\\b${id}\\b`), "").trim();
-
-  // 6) Email opcional (si aparece lo guardamos, si no, no pasa nada)
-  const emailMatch = rest.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
-  let email = "";
-  if (emailMatch) {
-    email = emailMatch[0];
-    rest = (rest.replace(email, "") || "").trim();
-  }
-
-  // 7) Nombre = lo que queda
-  const name = rest.replace(/\s{2,}/g, " ").trim();
   if (!name) return null;
 
   return {
@@ -131,9 +134,9 @@ const parseStudentLine = (line, meta) => {
   };
 };
 
-
 export async function parseCevazPdf(file) {
   const text = await extractTextFromPdf(file);
+
   const lines = (text || "")
     .split(/\r?\n/)
     .map((l) => l.trim())
@@ -153,12 +156,8 @@ export async function parseCevazPdf(file) {
   for (const line of lines) {
     extractMetaFromLine(line, meta, file?.name);
 
-    // Cabecera de columnas suele ser: "#  ID.  APELLIDOS NOMBRES EMAIL TELEFONO"
-    if (line.toUpperCase().includes("APELLIDOS") && line.toUpperCase().includes("EMAIL")) continue;
-
-    // Intentar leer alumno
-    const s = parseStudentLine(line, meta);
-    if (s && s.id) students.push(s);
+    const st = parseStudentLine(line, meta);
+    if (st && st.id) students.push(st);
   }
 
   return students;
