@@ -83,29 +83,39 @@ const extractMetaFromLine = (line, meta, fileName) => {
 };
 
 const parseStudentLine = (line, meta) => {
-  // Buscar email
-  const emailMatch = line.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
-  if (!emailMatch) return null;
-  const email = emailMatch[0];
-  const emailIdx = emailMatch.index ?? -1;
+  // Requisito mínimo: índice + cédula + nombre
+  if (!/^\d+\s+\d{4,12}\s+/.test(line)) return null;
 
-  const beforeEmail = line.slice(0, emailIdx).trim();
-  const afterEmail = line.slice(emailIdx + email.length).trim();
+  // 1) Teléfono al final (si existe)
+  const phoneMatch = line.match(/(\+?\d[\d\s-]{6,}\d)\s*$/);
+  const phoneRaw = phoneMatch ? phoneMatch[1] : "";
+  const phone = phoneRaw ? phoneRaw.replace(/[^\d+]/g, "") : "";
 
-  // Teléfono: tomar cualquier cosa numérica “larga”
-  const phoneMatch = afterEmail.match(/(\+?\d[\d\s-]{6,}\d)/);
-  const phoneRaw = phoneMatch ? phoneMatch[0] : "";
-  const phone = phoneRaw.replace(/[^\d+]/g, "");
+  // 2) Quitar teléfono del final
+  let rest = phoneMatch ? line.slice(0, phoneMatch.index).trim() : line.trim();
 
-  // ID: primer número largo (>=4) antes del email
-  const idMatch = beforeEmail.match(/\b\d{4,12}\b/);
+  // 3) Quitar índice "#"
+  rest = rest.replace(/^\d+\s+/, "").trim();
+
+  // 4) Cédula
+  const idMatch = rest.match(/\b\d{4,12}\b/);
   if (!idMatch) return null;
   const id = idMatch[0];
 
-  // Nombre: quitar índice y cédula del inicio, quedarnos con texto restante
-  const withoutIdx = beforeEmail.replace(/^\d+\s+/, ""); // quita el "#"
-  const withoutId = withoutIdx.replace(new RegExp(`\\b${id}\\b`), "").trim();
-  const name = withoutId.replace(/\s{2,}/g, " ").trim();
+  // 5) Quitar cédula
+  rest = rest.replace(new RegExp(`\\b${id}\\b`), "").trim();
+
+  // 6) Email opcional (si aparece lo guardamos, si no, no pasa nada)
+  const emailMatch = rest.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  let email = "";
+  if (emailMatch) {
+    email = emailMatch[0];
+    rest = (rest.replace(email, "") || "").trim();
+  }
+
+  // 7) Nombre = lo que queda
+  const name = rest.replace(/\s{2,}/g, " ").trim();
+  if (!name) return null;
 
   return {
     id,
@@ -120,6 +130,7 @@ const parseStudentLine = (line, meta) => {
     scheduleBlock: meta.scheduleBlock || "N/A",
   };
 };
+
 
 export async function parseCevazPdf(file) {
   const text = await extractTextFromPdf(file);
