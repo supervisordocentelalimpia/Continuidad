@@ -37,10 +37,126 @@ const COLORS = ["#0088FE", "#00C49F", "#FFBB28", "#FF8042", "#8884d8"];
 
 const isGraduated = (student) => (student?.levelNorm || "").toUpperCase() === "L19";
 
+/**
+ * Orden sugerido para que el filtro se vea "humano"
+ */
+const FRECUENCIA_ORDER = [
+  "MARTES Y JUEVES",
+  "MIERCOLES Y VIERNES",
+  "LUNES",
+  "SABATINO",
+  "INTENSIVO A",
+  "INTENSIVO B",
+  "INTENSIVO",
+  "N/A",
+];
+
+/**
+ * Inferimos frecuencia a partir del texto ANTES del "/" en la línea Horario:
+ * - "MARTES Y JUEVES / 6:15 A 7:45 PM" => MARTES Y JUEVES
+ * - "TUESDAY TO FRIDAY / 8:30 A 10:00 AM" => INTENSIVO (luego se parte en A/B por hora)
+ */
+const normalizeFrecuencia = (scheduleRaw = "") => {
+  if (!scheduleRaw) return "N/A";
+
+  const left = scheduleRaw.includes("/") ? scheduleRaw.split("/")[0].trim() : scheduleRaw.trim();
+  const up = left
+    .toUpperCase()
+    .replace(/\s+/g, " ")
+    .replace(/&/g, "Y")
+    .trim();
+
+  if (!up) return "N/A";
+
+  // Español
+  if (up.includes("MARTES") && up.includes("JUEVES")) return "MARTES Y JUEVES";
+  if ((up.includes("MIERCOLES") || up.includes("MIÉRCOLES")) && up.includes("VIERNES"))
+    return "MIERCOLES Y VIERNES";
+  if (up.includes("SABADO") || up.includes("SÁBADO") || up.includes("SABAT")) return "SABATINO";
+  if (up.includes("LUNES")) return "LUNES";
+
+  // Inglés
+  if (up.includes("TUESDAY") && up.includes("THURSDAY")) return "MARTES Y JUEVES";
+  if (up.includes("WEDNESDAY") && up.includes("FRIDAY")) return "MIERCOLES Y VIERNES";
+  if (up.includes("SATURDAY")) return "SABATINO";
+  if (up.includes("MONDAY") && !up.includes("TO")) return "LUNES";
+
+  // Intensivos (rangos de días)
+  // OJO: aquí NO se decide A/B. A/B se decide por HORA más adelante.
+  if (up.includes(" TO ") || /\sA\s/.test(up)) {
+    return "INTENSIVO";
+  }
+
+  // Si viene algo raro, lo devolvemos tal cual (mejor que perder info)
+  return left || "N/A";
+};
+
+const withFrequency = (arr) =>
+  (arr || []).map((s) => ({
+    ...s,
+    frequencyRaw: s.schedule || "",
+    frequencyNorm: normalizeFrecuencia(s.schedule || ""),
+  }));
+
+/**
+ * Lee la hora de inicio del bloque tipo "6:15 PM - 7:45 PM" y la pasa a minutos.
+ */
+const parseStartMinutes = (scheduleBlock = "") => {
+  const m = (scheduleBlock || "").match(/^\s*(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+  if (!m) return NaN;
+
+  let hh = parseInt(m[1], 10);
+  const mm = parseInt(m[2], 10);
+  const mer = m[3].toUpperCase();
+
+  if (hh === 12) hh = 0;
+  if (mer === "PM") hh += 12;
+
+  return hh * 60 + mm;
+};
+
+/**
+ * Separa INTENSIVO en A/B por la hora de inicio.
+ * - Los intensivos más tempranos => INTENSIVO A
+ * - Los intensivos más tarde => INTENSIVO B
+ * Como tú dijiste: B siempre después de A.
+ *
+ * Corte robusto: busca el mayor "salto" entre horas de inicio y corta ahí.
+ */
+const splitIntensivoAB = (students = []) => {
+  const times = students
+    .filter((s) => s.frequencyNorm === "INTENSIVO")
+    .map((s) => parseStartMinutes(s.scheduleBlock || ""))
+    .filter((t) => Number.isFinite(t));
+
+  const uniq = Array.from(new Set(times)).sort((a, b) => a - b);
+  if (uniq.length < 2) return students; // No hay con qué partir
+
+  let bestIdx = 0;
+  let bestGap = -1;
+  for (let i = 0; i < uniq.length - 1; i++) {
+    const gap = uniq[i + 1] - uniq[i];
+    if (gap > bestGap) {
+      bestGap = gap;
+      bestIdx = i;
+    }
+  }
+  const split = (uniq[bestIdx] + uniq[bestIdx + 1]) / 2;
+
+  return students.map((s) => {
+    if (s.frequencyNorm !== "INTENSIVO") return s;
+
+    const t = parseStartMinutes(s.scheduleBlock || "");
+    if (!Number.isFinite(t)) return s; // si no se pudo leer hora, se queda INTENSIVO
+
+    return { ...s, frequencyNorm: t <= split ? "INTENSIVO A" : "INTENSIVO B" };
+  });
+};
+
 const DashboardContinuidad = () => {
   const [activeTab, setActiveTab] = useState("upload"); // 'upload' | 'dashboard'
 
-  // ✅ AHORA SON LISTAS (múltiples PDFs)
+  // MULTI-PDF
   const [pdfOldFiles, setPdfOldFiles] = useState([]);
   const [pdfNewFiles, setPdfNewFiles] = useState([]);
 
@@ -65,11 +181,16 @@ const DashboardContinuidad = () => {
   // Gestión
   const [contacted, setContacted] = useState(new Set());
 
-  // Filtros
+  // Filtros (lista)
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("All");
   const [selectedLevel, setSelectedLevel] = useState("All");
   const [selectedHorario, setSelectedHorario] = useState("All");
+  const [selectedFrecuencia, setSelectedFrecuencia] = useState("All");
+
+  // Controles de gráficas
+  const [levelChartCategory, setLevelChartCategory] = useState("All"); // selector para “Fugas por Nivel”
+  const [pieMode, setPieMode] = useState("horario"); // 'horario' | 'frecuencia'
 
   const resetAll = () => {
     setPdfOldFiles([]);
@@ -82,6 +203,9 @@ const DashboardContinuidad = () => {
     setSelectedCategory("All");
     setSelectedLevel("All");
     setSelectedHorario("All");
+    setSelectedFrecuencia("All");
+    setLevelChartCategory("All");
+    setPieMode("horario");
     setStats({
       totalOld: 0,
       totalNew: 0,
@@ -98,7 +222,7 @@ const DashboardContinuidad = () => {
 
   const fileKey = (f) => `${f.name}__${f.size}__${f.lastModified}`;
 
-  // Permite seleccionar varias veces y que se vayan "sumando" sin duplicar
+  // Permite seleccionar varias veces y sumar sin duplicar
   const mergeFiles = (prev, incoming) => {
     const map = new Map(prev.map((f) => [fileKey(f), f]));
     for (const f of incoming) map.set(fileKey(f), f);
@@ -149,7 +273,7 @@ const DashboardContinuidad = () => {
       const [{ all: oldList, failed: failedOld }, { all: newList, failed: failedNew }] =
         await Promise.all([parseMany(pdfOldFiles), parseMany(pdfNewFiles)]);
 
-      // Normalizar duplicados por cédula
+      // Uniq por cédula
       const uniqById = (arr) => {
         const map = new Map();
         for (const s of arr) {
@@ -173,10 +297,25 @@ const DashboardContinuidad = () => {
         : 0;
       const lostPct = eligibleOld.length ? Math.round((lost.length / eligibleOld.length) * 100) : 0;
 
-      setOldStudents(oldU);
-      setNewStudents(newU);
-      setDropouts(lost);
+      // ✅ Enriquecemos con frecuencia
+      let oldUF = withFrequency(oldU);
+      let newUF = withFrequency(newU);
+      let lostF = withFrequency(lost);
+
+      // ✅ Separa INTENSIVO A/B por hora (B después de A)
+      oldUF = splitIntensivoAB(oldUF);
+      newUF = splitIntensivoAB(newUF);
+      lostF = splitIntensivoAB(lostF);
+
+      setOldStudents(oldUF);
+      setNewStudents(newUF);
+      setDropouts(lostF);
       setContacted(new Set());
+
+      // Reset visual de filtros principales al recalcular
+      setSelectedLevel("All");
+      setSelectedHorario("All");
+      setSelectedFrecuencia("All");
 
       setStats({
         totalOld: oldU.length,
@@ -218,22 +357,29 @@ const DashboardContinuidad = () => {
     const cats = Array.from(new Set(dropouts.map((s) => s.category).filter(Boolean))).sort();
     const lvls = Array.from(new Set(dropouts.map((s) => s.levelNorm).filter(Boolean))).sort();
     const hrs = Array.from(new Set(dropouts.map((s) => s.scheduleBlock).filter(Boolean)));
+    const freqs = Array.from(new Set(dropouts.map((s) => s.frequencyNorm).filter(Boolean)));
 
     const known = __HORARIO_BLOQUES__ || [];
     const knownSet = new Set(known);
-    const ordered = [
+    const orderedHorarios = [
       ...known.filter((h) => hrs.includes(h)),
       ...hrs.filter((h) => !knownSet.has(h)).sort(),
+    ];
+
+    const orderedFreqs = [
+      ...FRECUENCIA_ORDER.filter((f) => freqs.includes(f)),
+      ...freqs.filter((f) => !FRECUENCIA_ORDER.includes(f)).sort(),
     ];
 
     return {
       categories: ["All", ...cats],
       levels: ["All", ...lvls],
-      horarios: ["All", ...ordered],
+      horarios: ["All", ...orderedHorarios],
+      frecuencias: ["All", ...orderedFreqs],
     };
   }, [dropouts]);
 
-  // Filtrado principal
+  // Filtrado principal (lista)
   const filteredData = useMemo(() => {
     const q = searchTerm.trim().toLowerCase();
 
@@ -248,43 +394,49 @@ const DashboardContinuidad = () => {
       const matchesCategory = selectedCategory === "All" || s.category === selectedCategory;
       const matchesLevel = selectedLevel === "All" || s.levelNorm === selectedLevel;
       const matchesHorario = selectedHorario === "All" || s.scheduleBlock === selectedHorario;
+      const matchesFrecuencia = selectedFrecuencia === "All" || s.frequencyNorm === selectedFrecuencia;
 
-      return matchesSearch && matchesCategory && matchesLevel && matchesHorario;
+      return matchesSearch && matchesCategory && matchesFrecuencia && matchesLevel && matchesHorario;
     });
-  }, [dropouts, searchTerm, selectedCategory, selectedLevel, selectedHorario]);
+  }, [dropouts, searchTerm, selectedCategory, selectedLevel, selectedHorario, selectedFrecuencia]);
 
-  // Métricas para gráficas
-  const metrics = useMemo(() => {
-    const total = dropouts.length;
+  // Data para “Fugas por Nivel” (filtrable por categoría)
+  const barSource = useMemo(() => {
+    if (levelChartCategory === "All") return dropouts;
+    return dropouts.filter((s) => s.category === levelChartCategory);
+  }, [dropouts, levelChartCategory]);
 
-    const byLevel = dropouts.reduce((acc, s) => {
+  const chartDataLevel = useMemo(() => {
+    const byLevel = barSource.reduce((acc, s) => {
       const k = s.levelNorm || "N/A";
       acc[k] = (acc[k] || 0) + 1;
       return acc;
     }, {});
 
-    const byHorario = dropouts.reduce((acc, s) => {
-      const k = s.scheduleBlock || "N/A";
-      acc[k] = (acc[k] || 0) + 1;
-      return acc;
-    }, {});
-
-    const chartDataLevel = Object.keys(byLevel)
+    return Object.keys(byLevel)
       .map((k) => ({ name: k, count: byLevel[k] }))
       .sort((a, b) => {
         const na = parseInt(a.name.replace(/\D/g, "")) || 0;
         const nb = parseInt(b.name.replace(/\D/g, "")) || 0;
         return na - nb;
       });
+  }, [barSource]);
 
-    const chartDataHorario = Object.keys(byHorario)
-      .map((k) => ({ name: k, value: byHorario[k] }))
+  // Data para pie (Horario ↔ Frecuencia)
+  const chartDataPie = useMemo(() => {
+    const byKey = dropouts.reduce((acc, s) => {
+      const key = pieMode === "horario" ? (s.scheduleBlock || "N/A") : (s.frequencyNorm || "N/A");
+      acc[key] = (acc[key] || 0) + 1;
+      return acc;
+    }, {});
+
+    return Object.keys(byKey)
+      .map((k) => ({ name: k, value: byKey[k] }))
       .sort((a, b) => b.value - a.value);
+  }, [dropouts, pieMode]);
 
-    const topHorario = chartDataHorario[0]?.name || "N/A";
-
-    return { total, chartDataLevel, chartDataHorario, topHorario };
-  }, [dropouts]);
+  const totalDropouts = dropouts.length;
+  const topPieKey = chartDataPie[0]?.name || "N/A";
 
   const onClickLevelBar = (e) => {
     const label = e?.activeLabel;
@@ -295,7 +447,19 @@ const DashboardContinuidad = () => {
   const onClickPie = (data) => {
     const name = data?.name;
     if (!name) return;
-    setSelectedHorario(name);
+
+    if (pieMode === "horario") setSelectedHorario(name);
+    else setSelectedFrecuencia(name);
+  };
+
+  const togglePieMode = () => {
+    setPieMode((prev) => {
+      const next = prev === "horario" ? "frecuencia" : "horario";
+      // Evita confusión: al cambiar modo, limpias el filtro del otro modo
+      if (next === "frecuencia") setSelectedHorario("All");
+      else setSelectedFrecuencia("All");
+      return next;
+    });
   };
 
   const exportExcel = () => {
@@ -306,6 +470,7 @@ const DashboardContinuidad = () => {
       Cedula: s.id,
       Estudiante: s.name,
       Categoria: s.category,
+      Frecuencia: s.frequencyNorm || "N/A",
       Nivel: s.levelNorm,
       Horario: s.scheduleBlock,
       Email: s.email || "",
@@ -372,7 +537,7 @@ const DashboardContinuidad = () => {
               onChange={(e) => {
                 const files = Array.from(e.target.files || []);
                 setPdfOldFiles((prev) => mergeFiles(prev, files));
-                e.target.value = ""; // permite volver a seleccionar el mismo archivo
+                e.target.value = "";
               }}
               className="block w-full text-sm"
             />
@@ -567,7 +732,7 @@ const DashboardContinuidad = () => {
           <div className="flex items-center justify-between">
             <div>
               <p className="text-sm font-medium text-slate-500">Acción Requerida</p>
-              <h3 className="text-2xl font-bold text-slate-800">{metrics.total - contacted.size}</h3>
+              <h3 className="text-2xl font-bold text-slate-800">{totalDropouts - contacted.size}</h3>
             </div>
             <Phone className="h-10 w-10 text-blue-100" />
           </div>
@@ -577,8 +742,10 @@ const DashboardContinuidad = () => {
         <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-100 border-l-4 border-l-indigo-500">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-sm font-medium text-slate-500">Horario con más fugas</p>
-              <h3 className="text-lg font-bold text-slate-800 truncate">{metrics.topHorario}</h3>
+              <p className="text-sm font-medium text-slate-500">
+                {pieMode === "horario" ? "Horario con más fugas" : "Frecuencia con más fugas"}
+              </p>
+              <h3 className="text-lg font-bold text-slate-800 truncate">{topPieKey}</h3>
             </div>
             <Clock className="h-10 w-10 text-indigo-100" />
           </div>
@@ -587,19 +754,37 @@ const DashboardContinuidad = () => {
       </div>
 
       {/* CHARTS */}
-      {metrics.total > 0 ? (
+      {totalDropouts > 0 ? (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
           <div className="lg:col-span-2 bg-white p-6 rounded-xl shadow-sm border border-slate-100">
             <div className="flex items-center justify-between gap-3 flex-wrap">
-              <h3 className="text-lg font-bold text-slate-800">Fugas por Nivel</h3>
-              <div className="text-xs text-slate-500">
-                Tip: haz click en una barra para filtrar la lista por ese nivel.
+              <div>
+                <h3 className="text-lg font-bold text-slate-800">Fugas por Nivel</h3>
+                <div className="text-xs text-slate-500">
+                  Tip: click en una barra para filtrar la lista por ese nivel.
+                </div>
+              </div>
+
+              {/* Selector por categoría */}
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-slate-500">Categoría:</span>
+                <select
+                  value={levelChartCategory}
+                  onChange={(e) => setLevelChartCategory(e.target.value)}
+                  className="bg-slate-50 border border-slate-200 text-slate-700 text-xs px-3 py-1.5 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  {filterOptions.categories.map((c) => (
+                    <option key={c} value={c}>
+                      {c === "All" ? "Todas" : c}
+                    </option>
+                  ))}
+                </select>
               </div>
             </div>
 
             <div className="h-64 w-full mt-3">
               <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={metrics.chartDataLevel} onClick={onClickLevelBar}>
+                <BarChart data={chartDataLevel} onClick={onClickLevelBar}>
                   <CartesianGrid strokeDasharray="3 3" vertical={false} />
                   <XAxis dataKey="name" tick={{ fontSize: 10 }} interval={0} />
                   <YAxis />
@@ -611,12 +796,27 @@ const DashboardContinuidad = () => {
           </div>
 
           <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-100">
-            <h3 className="text-lg font-bold text-slate-800 mb-4">Deserción por Horario</h3>
+            <div className="flex items-center justify-between gap-3 mb-3">
+              <h3 className="text-lg font-bold text-slate-800">
+                Deserción por {pieMode === "horario" ? "Horario" : "Frecuencia"}
+              </h3>
+
+              {/* Botón Horario ↔ Frecuencia */}
+              <button
+                onClick={togglePieMode}
+                type="button"
+                className="text-xs bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 px-3 py-1.5 rounded-lg"
+                title="Cambiar dimensión del gráfico"
+              >
+                {pieMode === "horario" ? "Ver por Frecuencia" : "Ver por Horario"}
+              </button>
+            </div>
+
             <div className="h-64 w-full">
               <ResponsiveContainer width="100%" height="100%">
                 <PieChart>
                   <Pie
-                    data={metrics.chartDataHorario}
+                    data={chartDataPie}
                     cx="50%"
                     cy="50%"
                     innerRadius={60}
@@ -625,7 +825,7 @@ const DashboardContinuidad = () => {
                     dataKey="value"
                     onClick={onClickPie}
                   >
-                    {metrics.chartDataHorario.map((entry, index) => (
+                    {chartDataPie.map((entry, index) => (
                       <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
                     ))}
                   </Pie>
@@ -634,7 +834,11 @@ const DashboardContinuidad = () => {
                 </PieChart>
               </ResponsiveContainer>
             </div>
-            <p className="text-xs text-slate-500 mt-2">Tip: haz click en un segmento para filtrar por horario.</p>
+
+            <p className="text-xs text-slate-500 mt-2">
+              Tip: click en un segmento para filtrar la lista por{" "}
+              {pieMode === "horario" ? "horario" : "frecuencia"}.
+            </p>
           </div>
         </div>
       ) : (
@@ -656,11 +860,12 @@ const DashboardContinuidad = () => {
           <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-3">
             <h3 className="text-lg font-bold text-slate-800">Lista de Gestión</h3>
             <div className="text-xs text-slate-500">
-              Mostrando {filteredData.length} de {metrics.total}
+              Mostrando {filteredData.length} de {totalDropouts}
             </div>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+          {/* 5 filtros + búsqueda */}
+          <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
             <div className="relative">
               <select
                 value={selectedCategory}
@@ -670,6 +875,21 @@ const DashboardContinuidad = () => {
                 {filterOptions.categories.map((c) => (
                   <option key={c} value={c}>
                     {c === "All" ? "Todas las categorías" : c}
+                  </option>
+                ))}
+              </select>
+              <Filter className="absolute right-3 top-2.5 h-4 w-4 text-slate-400 pointer-events-none" />
+            </div>
+
+            <div className="relative">
+              <select
+                value={selectedFrecuencia}
+                onChange={(e) => setSelectedFrecuencia(e.target.value)}
+                className="appearance-none bg-slate-50 border border-slate-200 text-slate-700 py-2 pl-4 pr-8 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                {filterOptions.frecuencias.map((f) => (
+                  <option key={f} value={f}>
+                    {f === "All" ? "Todas las frecuencias" : f}
                   </option>
                 ))}
               </select>
@@ -727,6 +947,7 @@ const DashboardContinuidad = () => {
                 <th className="p-4 font-semibold border-b border-slate-100">Estudiante</th>
                 <th className="p-4 font-semibold border-b border-slate-100">Cédula</th>
                 <th className="p-4 font-semibold border-b border-slate-100">Categoría</th>
+                <th className="p-4 font-semibold border-b border-slate-100">Frecuencia</th>
                 <th className="p-4 font-semibold border-b border-slate-100">Nivel</th>
                 <th className="p-4 font-semibold border-b border-slate-100">Horario</th>
                 <th className="p-4 font-semibold border-b border-slate-100">Email</th>
@@ -761,6 +982,7 @@ const DashboardContinuidad = () => {
                     <td className="p-4 font-medium text-slate-900">{s.name}</td>
                     <td className="p-4 font-mono text-xs">{s.id}</td>
                     <td className="p-4">{s.category}</td>
+                    <td className="p-4 text-slate-600">{s.frequencyNorm || "N/A"}</td>
 
                     <td className="p-4">
                       <span className="px-2 py-1 bg-slate-100 rounded text-xs font-bold text-slate-600">
@@ -807,7 +1029,7 @@ const DashboardContinuidad = () => {
                 ))
               ) : (
                 <tr>
-                  <td colSpan="9" className="p-8 text-center text-slate-400">
+                  <td colSpan="10" className="p-8 text-center text-slate-400">
                     No se encontraron estudiantes con los filtros actuales.
                   </td>
                 </tr>
