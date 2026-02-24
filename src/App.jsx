@@ -33,7 +33,31 @@ import {
 
 import { parseCevazPdf, __HORARIO_BLOQUES__ } from "./utils/parseCevazPdf";
 
-const COLORS = ["#0088FE", "#00C49F", "#FFBB28", "#FF8042", "#8884d8"];
+// Colores fijos por FRECUENCIA
+const FRECUENCIA_COLORS = {
+  "MARTES Y JUEVES": "#7c3aed", // morado
+  "MIERCOLES Y VIERNES": "#f97316", // naranja
+  SABATINO: "#2563eb", // azul
+  LUNES: "#16a34a", // verde
+  "INTENSIVO A": "#c27ba0", // magenta solicitado
+  "INTENSIVO B": "#ead1dc", // rosado claro solicitado
+  INTENSIVO: "#a855f7", // fallback intensivo genérico (por si aparece)
+  "N/A": "#94a3b8",
+};
+
+// Paleta solo para HORARIOS (si estás en “Deserción por Horario”)
+const HORARIO_COLORS = [
+  "#2563eb",
+  "#16a34a",
+  "#f97316",
+  "#7c3aed",
+  "#0ea5e9",
+  "#f43f5e",
+  "#22c55e",
+  "#eab308",
+  "#a855f7",
+  "#64748b",
+];c
 const isGraduated = (student) => (student?.levelNorm || "").toUpperCase() === "L19";
 
 const FRECUENCIA_ORDER = [
@@ -794,18 +818,27 @@ const DashboardContinuidad = () => {
               <ResponsiveContainer width="100%" height="100%">
                 <PieChart>
                   <Pie
-                    data={chartDataPie}
-                    cx="50%"
-                    cy="50%"
-                    innerRadius={60}
-                    outerRadius={85}
-                    paddingAngle={4}
-                    dataKey="value"
-                    onClick={onClickPie}
-                  >
-                    {chartDataPie.map((entry, index) => (
-                      <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                    ))}
+                    {chartDataPie.map((entry, index) => {
+  const name = entry?.name || "N/A";
+
+  // Si estás viendo FRECUENCIA => color fijo por mapa
+  if (pieMode === "frecuencia") {
+    return (
+      <Cell
+        key={`cell-${index}`}
+        fill={FRECUENCIA_COLORS[name] || "#94a3b8"}
+      />
+    );
+  }
+
+  // Si estás viendo HORARIO => paleta por índice
+  return (
+    <Cell
+      key={`cell-${index}`}
+      fill={HORARIO_COLORS[index % HORARIO_COLORS.length]}
+    />
+  );
+})}
                   </Pie>
                   <Tooltip />
                   <Legend />
