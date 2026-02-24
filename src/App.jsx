@@ -2,12 +2,33 @@
 import React, { useMemo, useState } from "react";
 import * as XLSX from "xlsx";
 import {
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-  PieChart, Pie, Cell, Legend
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+  PieChart,
+  Pie,
+  Cell,
+  Legend,
 } from "recharts";
 import {
-  Search, Users, Clock, AlertTriangle, Download,
-  CheckCircle, XCircle, Filter, Phone, Upload, FileText, RefreshCw, ChevronRight, Trash2
+  Search,
+  Users,
+  Clock,
+  AlertTriangle,
+  Download,
+  CheckCircle,
+  XCircle,
+  Filter,
+  Phone,
+  Upload,
+  FileText,
+  RefreshCw,
+  ChevronRight,
+  Trash2,
 } from "lucide-react";
 
 import { parseCevazPdf, __HORARIO_BLOQUES__ } from "./utils/parseCevazPdf";
@@ -19,11 +40,13 @@ const isGraduated = (student) => (student?.levelNorm || "").toUpperCase() === "L
 const DashboardContinuidad = () => {
   const [activeTab, setActiveTab] = useState("upload"); // 'upload' | 'dashboard'
 
-  const [pdfOld, setPdfOld] = useState(null);
-  const [pdfNew, setPdfNew] = useState(null);
+  // ✅ AHORA SON LISTAS (múltiples PDFs)
+  const [pdfOldFiles, setPdfOldFiles] = useState([]);
+  const [pdfNewFiles, setPdfNewFiles] = useState([]);
 
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
+  const [warnMsg, setWarnMsg] = useState("");
 
   const [oldStudents, setOldStudents] = useState([]);
   const [newStudents, setNewStudents] = useState([]);
@@ -49,8 +72,8 @@ const DashboardContinuidad = () => {
   const [selectedHorario, setSelectedHorario] = useState("All");
 
   const resetAll = () => {
-    setPdfOld(null);
-    setPdfNew(null);
+    setPdfOldFiles([]);
+    setPdfNewFiles([]);
     setOldStudents([]);
     setNewStudents([]);
     setDropouts([]);
@@ -60,35 +83,71 @@ const DashboardContinuidad = () => {
     setSelectedLevel("All");
     setSelectedHorario("All");
     setStats({
-      totalOld: 0, totalNew: 0, eligibleOld: 0,
-      reenrolled: 0, reenrolledPct: 0, lost: 0, lostPct: 0
+      totalOld: 0,
+      totalNew: 0,
+      eligibleOld: 0,
+      reenrolled: 0,
+      reenrolledPct: 0,
+      lost: 0,
+      lostPct: 0,
     });
     setErrorMsg("");
+    setWarnMsg("");
     setActiveTab("upload");
+  };
+
+  const fileKey = (f) => `${f.name}__${f.size}__${f.lastModified}`;
+
+  // Permite seleccionar varias veces y que se vayan "sumando" sin duplicar
+  const mergeFiles = (prev, incoming) => {
+    const map = new Map(prev.map((f) => [fileKey(f), f]));
+    for (const f of incoming) map.set(fileKey(f), f);
+    return Array.from(map.values());
+  };
+
+  const removeOldAt = (idx) => setPdfOldFiles((prev) => prev.filter((_, i) => i !== idx));
+  const removeNewAt = (idx) => setPdfNewFiles((prev) => prev.filter((_, i) => i !== idx));
+
+  const parseMany = async (files) => {
+    const failed = [];
+    const chunks = await Promise.all(
+      files.map(async (f) => {
+        try {
+          const list = await parseCevazPdf(f);
+          if (!list?.length) failed.push(f.name);
+          return list || [];
+        } catch {
+          failed.push(f.name);
+          return [];
+        }
+      })
+    );
+
+    const all = chunks.flat();
+
+    if (!all.length) {
+      throw new Error(
+        "No se pudo extraer alumnos de los PDFs seleccionados. Posible PDF escaneado (imagen) o formato distinto."
+      );
+    }
+
+    return { all, failed };
   };
 
   const processPdfs = async () => {
     setErrorMsg("");
-    if (!pdfOld || !pdfNew) {
-      setErrorMsg("Debes seleccionar el PDF ANTERIOR y el PDF ACTUAL.");
+    setWarnMsg("");
+
+    if (!pdfOldFiles.length || !pdfNewFiles.length) {
+      setErrorMsg("Debes seleccionar al menos 1 PDF ANTERIOR y 1 PDF ACTUAL.");
       return;
     }
 
     try {
       setLoading(true);
 
-      const [oldList, newList] = await Promise.all([
-        parseCevazPdf(pdfOld),
-        parseCevazPdf(pdfNew),
-      ]);
-
-      if (!oldList.length || !newList.length) {
-        throw new Error(
-          `No se pudo extraer alumnos de uno de los PDFs. ` +
-          `Old=${oldList.length}, New=${newList.length}. ` +
-          `Posible PDF escaneado o formato distinto.`
-        );
-      }
+      const [{ all: oldList, failed: failedOld }, { all: newList, failed: failedNew }] =
+        await Promise.all([parseMany(pdfOldFiles), parseMany(pdfNewFiles)]);
 
       // Normalizar duplicados por cédula
       const uniqById = (arr) => {
@@ -109,7 +168,9 @@ const DashboardContinuidad = () => {
       const reenrolled = eligibleOld.filter((s) => newIds.has(s.id));
       const lost = eligibleOld.filter((s) => !newIds.has(s.id));
 
-      const reenrolledPct = eligibleOld.length ? Math.round((reenrolled.length / eligibleOld.length) * 100) : 0;
+      const reenrolledPct = eligibleOld.length
+        ? Math.round((reenrolled.length / eligibleOld.length) * 100)
+        : 0;
       const lostPct = eligibleOld.length ? Math.round((lost.length / eligibleOld.length) * 100) : 0;
 
       setOldStudents(oldU);
@@ -127,12 +188,18 @@ const DashboardContinuidad = () => {
         lostPct,
       });
 
+      const allFailed = [...(failedOld || []), ...(failedNew || [])];
+      if (allFailed.length) {
+        setWarnMsg(
+          `Ojo: no pude leer ${allFailed.length} PDF(s) (probablemente escaneados): ${allFailed.join(", ")}`
+        );
+      }
+
       setActiveTab("dashboard");
     } catch (e) {
       console.error(e);
       setErrorMsg(
-        e?.message ||
-        "No pude leer los PDFs. Si el PDF es escaneado (imagen), no se puede extraer texto."
+        e?.message || "No pude leer los PDFs. Si el PDF es escaneado (imagen), no se puede extraer texto."
       );
     } finally {
       setLoading(false);
@@ -265,11 +332,20 @@ const DashboardContinuidad = () => {
           <p className="text-slate-500 text-sm mt-1">
             Los PDFs se procesan localmente en tu navegador. No se guardan.
           </p>
+          <p className="text-slate-500 text-xs mt-1">
+            Tip: puedes seleccionar varios a la vez (Ctrl/Shift) o seleccionar otra vez para ir sumando.
+          </p>
         </header>
 
         {errorMsg ? (
           <div className="mb-4 p-4 rounded-lg border border-red-200 bg-red-50 text-red-700 text-sm">
             {errorMsg}
+          </div>
+        ) : null}
+
+        {warnMsg ? (
+          <div className="mb-4 p-4 rounded-lg border border-amber-200 bg-amber-50 text-amber-800 text-sm">
+            {warnMsg}
           </div>
         ) : null}
 
@@ -281,7 +357,7 @@ const DashboardContinuidad = () => {
               </span>
               <button
                 className="text-slate-500 hover:text-slate-700 text-sm inline-flex items-center gap-2"
-                onClick={() => setPdfOld(null)}
+                onClick={() => setPdfOldFiles([])}
                 type="button"
               >
                 <Trash2 className="h-4 w-4" />
@@ -292,12 +368,36 @@ const DashboardContinuidad = () => {
             <input
               type="file"
               accept="application/pdf"
-              onChange={(e) => setPdfOld(e.target.files?.[0] || null)}
+              multiple
+              onChange={(e) => {
+                const files = Array.from(e.target.files || []);
+                setPdfOldFiles((prev) => mergeFiles(prev, files));
+                e.target.value = ""; // permite volver a seleccionar el mismo archivo
+              }}
               className="block w-full text-sm"
             />
+
             <div className="text-xs text-slate-500 mt-2">
-              {pdfOld ? `Seleccionado: ${pdfOld.name}` : "No hay PDF seleccionado."}
+              {pdfOldFiles.length ? `Seleccionados: ${pdfOldFiles.length}` : "No hay PDFs seleccionados."}
             </div>
+
+            {pdfOldFiles.length ? (
+              <ul className="mt-3 space-y-2">
+                {pdfOldFiles.map((f, idx) => (
+                  <li key={fileKey(f)} className="flex items-center justify-between gap-3 text-xs">
+                    <span className="text-slate-700 truncate">{f.name}</span>
+                    <button
+                      type="button"
+                      onClick={() => removeOldAt(idx)}
+                      className="text-slate-500 hover:text-red-600 inline-flex items-center gap-1"
+                      title="Quitar"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
           </div>
 
           <div className="bg-white p-5 rounded-xl border border-slate-100 shadow-sm">
@@ -307,7 +407,7 @@ const DashboardContinuidad = () => {
               </span>
               <button
                 className="text-slate-500 hover:text-slate-700 text-sm inline-flex items-center gap-2"
-                onClick={() => setPdfNew(null)}
+                onClick={() => setPdfNewFiles([])}
                 type="button"
               >
                 <Trash2 className="h-4 w-4" />
@@ -318,12 +418,36 @@ const DashboardContinuidad = () => {
             <input
               type="file"
               accept="application/pdf"
-              onChange={(e) => setPdfNew(e.target.files?.[0] || null)}
+              multiple
+              onChange={(e) => {
+                const files = Array.from(e.target.files || []);
+                setPdfNewFiles((prev) => mergeFiles(prev, files));
+                e.target.value = "";
+              }}
               className="block w-full text-sm"
             />
+
             <div className="text-xs text-slate-500 mt-2">
-              {pdfNew ? `Seleccionado: ${pdfNew.name}` : "No hay PDF seleccionado."}
+              {pdfNewFiles.length ? `Seleccionados: ${pdfNewFiles.length}` : "No hay PDFs seleccionados."}
             </div>
+
+            {pdfNewFiles.length ? (
+              <ul className="mt-3 space-y-2">
+                {pdfNewFiles.map((f, idx) => (
+                  <li key={fileKey(f)} className="flex items-center justify-between gap-3 text-xs">
+                    <span className="text-slate-700 truncate">{f.name}</span>
+                    <button
+                      type="button"
+                      onClick={() => removeNewAt(idx)}
+                      className="text-slate-500 hover:text-red-600 inline-flex items-center gap-1"
+                      title="Quitar"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
           </div>
         </div>
 
@@ -348,7 +472,7 @@ const DashboardContinuidad = () => {
         </div>
 
         <p className="text-xs text-slate-500 mt-4">
-          Nota: Si el PDF es escaneado (imagen), el sistema no podrá leer los alumnos.
+          Nota: Si un PDF es escaneado (imagen), el sistema no podrá leer los alumnos de ese archivo.
         </p>
       </div>
     );
@@ -404,6 +528,12 @@ const DashboardContinuidad = () => {
           </button>
         </div>
       </header>
+
+      {warnMsg ? (
+        <div className="mb-6 p-4 rounded-lg border border-amber-200 bg-amber-50 text-amber-800 text-sm">
+          {warnMsg}
+        </div>
+      ) : null}
 
       {/* METRICS */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
@@ -504,9 +634,7 @@ const DashboardContinuidad = () => {
                 </PieChart>
               </ResponsiveContainer>
             </div>
-            <p className="text-xs text-slate-500 mt-2">
-              Tip: haz click en un segmento para filtrar por horario.
-            </p>
+            <p className="text-xs text-slate-500 mt-2">Tip: haz click en un segmento para filtrar por horario.</p>
           </div>
         </div>
       ) : (
@@ -540,7 +668,9 @@ const DashboardContinuidad = () => {
                 className="appearance-none bg-slate-50 border border-slate-200 text-slate-700 py-2 pl-4 pr-8 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-blue-500"
               >
                 {filterOptions.categories.map((c) => (
-                  <option key={c} value={c}>{c === "All" ? "Todas las categorías" : c}</option>
+                  <option key={c} value={c}>
+                    {c === "All" ? "Todas las categorías" : c}
+                  </option>
                 ))}
               </select>
               <Filter className="absolute right-3 top-2.5 h-4 w-4 text-slate-400 pointer-events-none" />
@@ -553,7 +683,9 @@ const DashboardContinuidad = () => {
                 className="appearance-none bg-slate-50 border border-slate-200 text-slate-700 py-2 pl-4 pr-8 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-blue-500"
               >
                 {filterOptions.levels.map((l) => (
-                  <option key={l} value={l}>{l === "All" ? "Todos los niveles" : l}</option>
+                  <option key={l} value={l}>
+                    {l === "All" ? "Todos los niveles" : l}
+                  </option>
                 ))}
               </select>
               <Filter className="absolute right-3 top-2.5 h-4 w-4 text-slate-400 pointer-events-none" />
@@ -566,7 +698,9 @@ const DashboardContinuidad = () => {
                 className="appearance-none bg-slate-50 border border-slate-200 text-slate-700 py-2 pl-4 pr-8 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-blue-500"
               >
                 {filterOptions.horarios.map((h) => (
-                  <option key={h} value={h}>{h === "All" ? "Todos los horarios" : h}</option>
+                  <option key={h} value={h}>
+                    {h === "All" ? "Todos los horarios" : h}
+                  </option>
                 ))}
               </select>
               <Filter className="absolute right-3 top-2.5 h-4 w-4 text-slate-400 pointer-events-none" />
