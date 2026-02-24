@@ -34,7 +34,6 @@ import {
 import { parseCevazPdf, __HORARIO_BLOQUES__ } from "./utils/parseCevazPdf";
 
 const COLORS = ["#0088FE", "#00C49F", "#FFBB28", "#FF8042", "#8884d8"];
-
 const isGraduated = (student) => (student?.levelNorm || "").toUpperCase() === "L19";
 
 /**
@@ -54,9 +53,9 @@ const FRECUENCIA_ORDER = [
 /**
  * Inferimos frecuencia a partir del texto ANTES del "/" en la línea Horario:
  * - "MARTES Y JUEVES / 6:15 A 7:45 PM" => MARTES Y JUEVES
- * - "TUESDAY TO FRIDAY / 8:30 A 10:00 AM" => INTENSIVO (luego se parte en A/B por hora)
+ * - "TUESDAY TO FRIDAY / 8:30 A 10:00 AM" => INTENSIVO (luego se separa A/B por el PDF)
  */
-const normalizeFrecuencia = (scheduleRaw = "") => {
+const normalizeFrecuenciaBase = (scheduleRaw = "") => {
   if (!scheduleRaw) return "N/A";
 
   const left = scheduleRaw.includes("/") ? scheduleRaw.split("/")[0].trim() : scheduleRaw.trim();
@@ -81,76 +80,174 @@ const normalizeFrecuencia = (scheduleRaw = "") => {
   if (up.includes("SATURDAY")) return "SABATINO";
   if (up.includes("MONDAY") && !up.includes("TO")) return "LUNES";
 
-  // Intensivos (rangos de días)
-  // OJO: aquí NO se decide A/B. A/B se decide por HORA más adelante.
-  if (up.includes(" TO ") || /\sA\s/.test(up)) {
-    return "INTENSIVO";
-  }
+  // Rangos => intensivo (NO A/B aquí)
+  if (up.includes(" TO ") || /\sA\s/.test(up)) return "INTENSIVO";
 
-  // Si viene algo raro, lo devolvemos tal cual (mejor que perder info)
+  // fallback: no perdemos info
   return left || "N/A";
 };
 
-const withFrequency = (arr) =>
-  (arr || []).map((s) => ({
-    ...s,
-    frequencyRaw: s.schedule || "",
-    frequencyNorm: normalizeFrecuencia(s.schedule || ""),
-  }));
+const fileKey = (f) => `${f.name}__${f.size}__${f.lastModified}`;
 
 /**
- * Lee la hora de inicio del bloque tipo "6:15 PM - 7:45 PM" y la pasa a minutos.
+ * Extrae una clave de fecha desde el nombre del PDF para ordenar intensivos dentro del periodo.
+ * Soporta:
+ * - yyyy-mm-dd / yyyy_mm_dd / yyyy/mm/dd
+ * - dd-mm / dd_mm / dd/mm  (asumimos formato latino dd_mm)
+ *
+ * Devuelve un número para ordenar (más pequeño = más viejo). Si no encuentra, devuelve null.
  */
-const parseStartMinutes = (scheduleBlock = "") => {
-  const m = (scheduleBlock || "").match(/^\s*(\d{1,2}):(\d{2})\s*(AM|PM)/i);
-  if (!m) return NaN;
+const extractDateKeyFromName = (name = "") => {
+  const up = (name || "").toUpperCase();
 
-  let hh = parseInt(m[1], 10);
-  const mm = parseInt(m[2], 10);
-  const mer = m[3].toUpperCase();
+  // 1) ISO: 2026-02-03
+  let m = up.match(/(20\d{2})[\/_\-](\d{1,2})[\/_\-](\d{1,2})/);
+  if (m) {
+    const y = parseInt(m[1], 10);
+    const mo = parseInt(m[2], 10);
+    const d = parseInt(m[3], 10);
+    return y * 10000 + mo * 100 + d;
+  }
 
-  if (hh === 12) hh = 0;
-  if (mer === "PM") hh += 12;
+  // 2) dd_mm (latino): 03_02
+  m = up.match(/(^|[^0-9])(\d{1,2})[\/_\-](\d{1,2})([^0-9]|$)/);
+  if (m) {
+    const d = parseInt(m[2], 10);
+    const mo = parseInt(m[3], 10);
+    // sin año: ordenamos por mes/día dentro del mismo año
+    return mo * 100 + d;
+  }
 
-  return hh * 60 + mm;
+  return null;
+};
+
+const sortFilesSmart = (files = []) => {
+  const withMeta = files.map((f, idx) => {
+    const dk = extractDateKeyFromName(f.name);
+    return {
+      f,
+      idx,
+      hasDate: dk !== null,
+      dk: dk ?? Number.POSITIVE_INFINITY,
+      name: (f.name || "").toUpperCase(),
+    };
+  });
+
+  // Orden: por fecha si existe; si no, por nombre; si empata, por orden original
+  withMeta.sort((a, b) => {
+    if (a.hasDate && b.hasDate) {
+      if (a.dk !== b.dk) return a.dk - b.dk;
+      if (a.name !== b.name) return a.name.localeCompare(b.name);
+      return a.idx - b.idx;
+    }
+
+    if (a.hasDate !== b.hasDate) return a.hasDate ? -1 : 1;
+
+    if (a.name !== b.name) return a.name.localeCompare(b.name);
+    return a.idx - b.idx;
+  });
+
+  return withMeta.map((x) => x.f);
+};
+
+const isIntensivoFileHint = (fileName = "") => {
+  const up = (fileName || "").toUpperCase();
+  return up.includes("INTENS") || up.includes(" INT ") || up.includes("_INT_") || up.includes("MARTES A VIERNES") || up.includes("TUESDAY TO FRIDAY");
 };
 
 /**
- * Separa INTENSIVO en A/B por la hora de inicio.
- * - Los intensivos más tempranos => INTENSIVO A
- * - Los intensivos más tarde => INTENSIVO B
- * Como tú dijiste: B siempre después de A.
- *
- * Corte robusto: busca el mayor "salto" entre horas de inicio y corta ahí.
+ * Asigna INTENSIVO A/B POR PDF dentro del mismo lado:
+ * - primer PDF intensivo (más viejo) => INTENSIVO A
+ * - segundo PDF intensivo (siguiente) => INTENSIVO B
+ * - si hay más de 2, todo lo demás queda como INTENSIVO B (para no inventar C/D)
  */
-const splitIntensivoAB = (students = []) => {
-  const times = students
-    .filter((s) => s.frequencyNorm === "INTENSIVO")
-    .map((s) => parseStartMinutes(s.scheduleBlock || ""))
-    .filter((t) => Number.isFinite(t));
+const buildIntensivoLabelMap = (filesOrdered = []) => {
+  const intensivo = filesOrdered.filter((f) => isIntensivoFileHint(f.name));
+  const map = new Map();
 
-  const uniq = Array.from(new Set(times)).sort((a, b) => a - b);
-  if (uniq.length < 2) return students; // No hay con qué partir
+  if (!intensivo.length) return map;
 
-  let bestIdx = 0;
-  let bestGap = -1;
-  for (let i = 0; i < uniq.length - 1; i++) {
-    const gap = uniq[i + 1] - uniq[i];
-    if (gap > bestGap) {
-      bestGap = gap;
-      bestIdx = i;
+  for (let i = 0; i < intensivo.length; i++) {
+    const fk = fileKey(intensivo[i]);
+    map.set(fk, i === 0 ? "INTENSIVO A" : "INTENSIVO B");
+  }
+  return map;
+};
+
+/**
+ * Parse de muchos PDFs, pero:
+ * - ordena archivos (para que "más viejo" y "más nuevo" sea consistente)
+ * - etiqueta alumnos con:
+ *   - __fileKey, __fileRank
+ *   - frequencyNorm (con INTENSIVO A/B por archivo)
+ */
+const parseMany = async (files) => {
+  const filesOrdered = sortFilesSmart(files);
+  const intensivoLabelByFile = buildIntensivoLabelMap(filesOrdered);
+
+  const failed = [];
+  const all = [];
+
+  for (let rank = 0; rank < filesOrdered.length; rank++) {
+    const f = filesOrdered[rank];
+    let list = [];
+    try {
+      list = await parseCevazPdf(f);
+      if (!list?.length) failed.push(f.name);
+    } catch {
+      failed.push(f.name);
+      list = [];
+    }
+
+    const fk = fileKey(f);
+
+    // Enriquecer cada alumno con frecuencia + trazabilidad del archivo
+    for (const s of list || []) {
+      const base = normalizeFrecuenciaBase(s.schedule || "");
+      const freq =
+        base === "INTENSIVO"
+          ? (intensivoLabelByFile.get(fk) || "INTENSIVO")
+          : base;
+
+      all.push({
+        ...s,
+        frequencyRaw: s.schedule || "",
+        frequencyNorm: freq,
+        __fileKey: fk,
+        __fileRank: rank,
+        __fileName: f.name,
+      });
     }
   }
-  const split = (uniq[bestIdx] + uniq[bestIdx + 1]) / 2;
 
-  return students.map((s) => {
-    if (s.frequencyNorm !== "INTENSIVO") return s;
+  if (!all.length) {
+    throw new Error(
+      "No se pudo extraer alumnos de los PDFs seleccionados. Posible PDF escaneado (imagen) o formato distinto."
+    );
+  }
 
-    const t = parseStartMinutes(s.scheduleBlock || "");
-    if (!Number.isFinite(t)) return s; // si no se pudo leer hora, se queda INTENSIVO
+  return { all, failed, filesOrdered };
+};
 
-    return { ...s, frequencyNorm: t <= split ? "INTENSIVO A" : "INTENSIVO B" };
-  });
+/**
+ * Dedup por cédula, pero conservando EL MÁS NUEVO dentro del lado (mayor __fileRank).
+ * Esto es clave para que si alguien aparece en INTENSIVO A y luego en INTENSIVO B,
+ * lo atribuyamos a B (lo último que cursó dentro del periodo).
+ */
+const uniqByIdPreferLatest = (arr) => {
+  const map = new Map();
+  for (const s of arr) {
+    if (!s?.id) continue;
+    const prev = map.get(s.id);
+    if (!prev) {
+      map.set(s.id, s);
+      continue;
+    }
+    const rPrev = Number.isFinite(prev.__fileRank) ? prev.__fileRank : -1;
+    const rNow = Number.isFinite(s.__fileRank) ? s.__fileRank : -1;
+    if (rNow >= rPrev) map.set(s.id, s);
+  }
+  return Array.from(map.values());
 };
 
 const DashboardContinuidad = () => {
@@ -220,8 +317,6 @@ const DashboardContinuidad = () => {
     setActiveTab("upload");
   };
 
-  const fileKey = (f) => `${f.name}__${f.size}__${f.lastModified}`;
-
   // Permite seleccionar varias veces y sumar sin duplicar
   const mergeFiles = (prev, incoming) => {
     const map = new Map(prev.map((f) => [fileKey(f), f]));
@@ -231,32 +326,6 @@ const DashboardContinuidad = () => {
 
   const removeOldAt = (idx) => setPdfOldFiles((prev) => prev.filter((_, i) => i !== idx));
   const removeNewAt = (idx) => setPdfNewFiles((prev) => prev.filter((_, i) => i !== idx));
-
-  const parseMany = async (files) => {
-    const failed = [];
-    const chunks = await Promise.all(
-      files.map(async (f) => {
-        try {
-          const list = await parseCevazPdf(f);
-          if (!list?.length) failed.push(f.name);
-          return list || [];
-        } catch {
-          failed.push(f.name);
-          return [];
-        }
-      })
-    );
-
-    const all = chunks.flat();
-
-    if (!all.length) {
-      throw new Error(
-        "No se pudo extraer alumnos de los PDFs seleccionados. Posible PDF escaneado (imagen) o formato distinto."
-      );
-    }
-
-    return { all, failed };
-  };
 
   const processPdfs = async () => {
     setErrorMsg("");
@@ -270,21 +339,11 @@ const DashboardContinuidad = () => {
     try {
       setLoading(true);
 
-      const [{ all: oldList, failed: failedOld }, { all: newList, failed: failedNew }] =
+      const [{ all: oldAll, failed: failedOld }, { all: newAll, failed: failedNew }] =
         await Promise.all([parseMany(pdfOldFiles), parseMany(pdfNewFiles)]);
 
-      // Uniq por cédula
-      const uniqById = (arr) => {
-        const map = new Map();
-        for (const s of arr) {
-          if (!s?.id) continue;
-          if (!map.has(s.id)) map.set(s.id, s);
-        }
-        return Array.from(map.values());
-      };
-
-      const oldU = uniqById(oldList);
-      const newU = uniqById(newList);
+      const oldU = uniqByIdPreferLatest(oldAll);
+      const newU = uniqByIdPreferLatest(newAll);
 
       const newIds = new Set(newU.map((s) => s.id));
 
@@ -297,22 +356,12 @@ const DashboardContinuidad = () => {
         : 0;
       const lostPct = eligibleOld.length ? Math.round((lost.length / eligibleOld.length) * 100) : 0;
 
-      // ✅ Enriquecemos con frecuencia
-      let oldUF = withFrequency(oldU);
-      let newUF = withFrequency(newU);
-      let lostF = withFrequency(lost);
-
-      // ✅ Separa INTENSIVO A/B por hora (B después de A)
-      oldUF = splitIntensivoAB(oldUF);
-      newUF = splitIntensivoAB(newUF);
-      lostF = splitIntensivoAB(lostF);
-
-      setOldStudents(oldUF);
-      setNewStudents(newUF);
-      setDropouts(lostF);
+      setOldStudents(oldU);
+      setNewStudents(newU);
+      setDropouts(lost);
       setContacted(new Set());
 
-      // Reset visual de filtros principales al recalcular
+      // Reset filtros “finos” al recalcular
       setSelectedLevel("All");
       setSelectedHorario("All");
       setSelectedFrecuencia("All");
@@ -338,7 +387,8 @@ const DashboardContinuidad = () => {
     } catch (e) {
       console.error(e);
       setErrorMsg(
-        e?.message || "No pude leer los PDFs. Si el PDF es escaneado (imagen), no se puede extraer texto."
+        e?.message ||
+          "No pude leer los PDFs. Si el PDF es escaneado (imagen), no se puede extraer texto."
       );
     } finally {
       setLoading(false);
@@ -425,7 +475,8 @@ const DashboardContinuidad = () => {
   // Data para pie (Horario ↔ Frecuencia)
   const chartDataPie = useMemo(() => {
     const byKey = dropouts.reduce((acc, s) => {
-      const key = pieMode === "horario" ? (s.scheduleBlock || "N/A") : (s.frequencyNorm || "N/A");
+      const key =
+        pieMode === "horario" ? (s.scheduleBlock || "N/A") : (s.frequencyNorm || "N/A");
       acc[key] = (acc[key] || 0) + 1;
       return acc;
     }, {});
@@ -455,7 +506,6 @@ const DashboardContinuidad = () => {
   const togglePieMode = () => {
     setPieMode((prev) => {
       const next = prev === "horario" ? "frecuencia" : "horario";
-      // Evita confusión: al cambiar modo, limpias el filtro del otro modo
       if (next === "frecuencia") setSelectedHorario("All");
       else setSelectedFrecuencia("All");
       return next;
@@ -848,7 +898,10 @@ const DashboardContinuidad = () => {
           </div>
           <h3 className="text-lg font-medium text-slate-700">No hay datos para mostrar</h3>
           <p className="text-slate-500 mb-4">Carga los PDFs para comenzar.</p>
-          <button onClick={() => setActiveTab("upload")} className="text-blue-600 font-semibold hover:underline">
+          <button
+            onClick={() => setActiveTab("upload")}
+            className="text-blue-600 font-semibold hover:underline"
+          >
             Ir a Cargar PDFs
           </button>
         </div>
