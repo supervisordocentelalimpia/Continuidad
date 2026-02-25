@@ -33,7 +33,11 @@ import {
 
 import { parseCevazPdf, __HORARIO_BLOQUES__ } from "./utils/parseCevazPdf";
 
-// Colores fijos por FRECUENCIA
+/* =========================
+   COLORES
+   ========================= */
+
+// Colores fijos por FRECUENCIA (modo "frecuencia" en el Pie)
 const FRECUENCIA_COLORS = {
   "MARTES Y JUEVES": "#7c3aed", // morado
   "MIERCOLES Y VIERNES": "#f97316", // naranja
@@ -41,11 +45,11 @@ const FRECUENCIA_COLORS = {
   LUNES: "#16a34a", // verde
   "INTENSIVO A": "#c27ba0", // magenta solicitado
   "INTENSIVO B": "#ead1dc", // rosado claro solicitado
-  INTENSIVO: "#a855f7", // fallback intensivo genérico (por si aparece)
+  INTENSIVO: "#a855f7", // fallback
   "N/A": "#94a3b8",
 };
 
-// Paleta solo para HORARIOS (si estás en “Deserción por Horario”)
+// Paleta para HORARIOS (modo "horario" en el Pie)
 const HORARIO_COLORS = [
   "#2563eb",
   "#16a34a",
@@ -57,8 +61,13 @@ const HORARIO_COLORS = [
   "#eab308",
   "#a855f7",
   "#64748b",
-];c
+];
+
 const isGraduated = (student) => (student?.levelNorm || "").toUpperCase() === "L19";
+
+/* =========================
+   FRECUENCIAS
+   ========================= */
 
 const FRECUENCIA_ORDER = [
   "MARTES Y JUEVES",
@@ -73,6 +82,7 @@ const FRECUENCIA_ORDER = [
 
 const fileKey = (f) => `${f.name}__${f.size}__${f.lastModified}`;
 
+// Frecuencia base desde la parte antes del "/" en "Horario:"
 const normalizeFrecuenciaBase = (scheduleRaw = "") => {
   if (!scheduleRaw) return "N/A";
 
@@ -104,10 +114,11 @@ const normalizeFrecuenciaBase = (scheduleRaw = "") => {
   return left || "N/A";
 };
 
+// Extrae fecha del nombre de archivo para ordenar intensivos (A antes que B)
 const extractDateKeyFromName = (name = "") => {
   const up = (name || "").toUpperCase();
 
-  // 2026-02-03 / 2026_02_03
+  // 2026-02-03 / 2026_02_03 / 2026/02/03
   let m = up.match(/(20\d{2})[\/_\-](\d{1,2})[\/_\-](\d{1,2})/);
   if (m) {
     const y = parseInt(m[1], 10);
@@ -116,7 +127,7 @@ const extractDateKeyFromName = (name = "") => {
     return y * 10000 + mo * 100 + d;
   }
 
-  // 03_02 / 03-02
+  // 03_02 / 03-02 / 03/02 (sin año)
   m = up.match(/(^|[^0-9])(\d{1,2})[\/_\-](\d{1,2})([^0-9]|$)/);
   if (m) {
     const d = parseInt(m[2], 10);
@@ -164,6 +175,7 @@ const isIntensivoFileHint = (fileName = "") => {
   );
 };
 
+// Dentro del mismo lado (Anterior/Actual): primer intensivo => A, segundo => B (según orden por fecha/nombre)
 const buildIntensivoLabelMap = (filesOrdered = []) => {
   const intensivo = filesOrdered.filter((f) => isIntensivoFileHint(f.name));
   const map = new Map();
@@ -215,7 +227,7 @@ const parseMany = async (files) => {
   return { all, failed };
 };
 
-// dedup por cédula, conservando el “más nuevo” dentro del lado
+// Dedup por cédula, conservando el alumno que viene del PDF “más nuevo” dentro del lado
 const uniqByIdPreferLatest = (arr) => {
   const map = new Map();
   for (const s of arr) {
@@ -232,9 +244,14 @@ const uniqByIdPreferLatest = (arr) => {
   return Array.from(map.values());
 };
 
+/* =========================
+   COMPONENTE
+   ========================= */
+
 const DashboardContinuidad = () => {
   const [activeTab, setActiveTab] = useState("upload");
 
+  // multi PDF
   const [pdfOldFiles, setPdfOldFiles] = useState([]);
   const [pdfNewFiles, setPdfNewFiles] = useState([]);
 
@@ -294,7 +311,7 @@ const DashboardContinuidad = () => {
     setSelectedLevel("All");
     setSelectedHorario("All");
     setLevelChartCategory("All");
-    // no fuerzo pieMode; si quieres que también se resetee, descomenta:
+    // si quieres resetear también el modo del pie:
     // setPieMode("horario");
   };
 
@@ -348,7 +365,6 @@ const DashboardContinuidad = () => {
         lostPct,
       });
 
-      // resetea filtros al recalcular (para que no “parezca” vacío)
       resetFilters();
 
       const allFailed = [...(failedOld || []), ...(failedNew || [])];
@@ -362,8 +378,7 @@ const DashboardContinuidad = () => {
     } catch (e) {
       console.error(e);
       setErrorMsg(
-        e?.message ||
-          "No pude leer los PDFs. Si el PDF es escaneado (imagen), no se puede extraer texto."
+        e?.message || "No pude leer los PDFs. Si el PDF es escaneado (imagen), no se puede extraer texto."
       );
     } finally {
       setLoading(false);
@@ -465,6 +480,7 @@ const DashboardContinuidad = () => {
   const onClickPie = (data) => {
     const name = data?.name || data?.payload?.name;
     if (!name) return;
+
     if (pieMode === "horario") setSelectedHorario(name);
     else setSelectedFrecuencia(name);
   };
@@ -480,6 +496,7 @@ const DashboardContinuidad = () => {
 
   const exportExcel = () => {
     if (!filteredData.length) return;
+
     const rows = filteredData.map((s) => ({
       Estado: contacted.has(s.id) ? "Contactado" : "Pendiente",
       Cedula: s.id,
@@ -499,7 +516,9 @@ const DashboardContinuidad = () => {
     XLSX.writeFile(wb, `continuidad_no_inscritos_${today}.xlsx`);
   };
 
-  // ---------------- UPLOAD VIEW ----------------
+  /* =========================
+     UPLOAD VIEW
+     ========================= */
   if (activeTab === "upload") {
     return (
       <div className="min-h-screen bg-slate-50 p-6 font-sans text-slate-800">
@@ -508,24 +527,33 @@ const DashboardContinuidad = () => {
             <Upload className="h-6 w-6 text-blue-600" />
             Continuidad - Cargar PDFs
           </h1>
-          <p className="text-slate-500 text-sm mt-1">Los PDFs se procesan localmente en tu navegador. No se guardan.</p>
+          <p className="text-slate-500 text-sm mt-1">
+            Los PDFs se procesan localmente en tu navegador. No se guardan.
+          </p>
           <p className="text-slate-500 text-xs mt-1">
             Tip: puedes seleccionar varios a la vez (Ctrl/Shift) o seleccionar otra vez para ir sumando.
           </p>
         </header>
 
         {errorMsg ? (
-          <div className="mb-4 p-4 rounded-lg border border-red-200 bg-red-50 text-red-700 text-sm">{errorMsg}</div>
+          <div className="mb-4 p-4 rounded-lg border border-red-200 bg-red-50 text-red-700 text-sm">
+            {errorMsg}
+          </div>
         ) : null}
 
         {warnMsg ? (
-          <div className="mb-4 p-4 rounded-lg border border-amber-200 bg-amber-50 text-amber-800 text-sm">{warnMsg}</div>
+          <div className="mb-4 p-4 rounded-lg border border-amber-200 bg-amber-50 text-amber-800 text-sm">
+            {warnMsg}
+          </div>
         ) : null}
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          {/* OLD */}
           <div className="bg-white p-5 rounded-xl border border-slate-100 shadow-sm">
             <div className="flex items-center justify-between mb-3">
-              <span className="bg-red-100 text-red-700 px-2 py-0.5 rounded text-xs font-semibold">Periodo ANTERIOR</span>
+              <span className="bg-red-100 text-red-700 px-2 py-0.5 rounded text-xs font-semibold">
+                Periodo ANTERIOR
+              </span>
               <button
                 className="text-slate-500 hover:text-slate-700 text-sm inline-flex items-center gap-2"
                 onClick={() => setPdfOldFiles([])}
@@ -571,9 +599,12 @@ const DashboardContinuidad = () => {
             ) : null}
           </div>
 
+          {/* NEW */}
           <div className="bg-white p-5 rounded-xl border border-slate-100 shadow-sm">
             <div className="flex items-center justify-between mb-3">
-              <span className="bg-green-100 text-green-700 px-2 py-0.5 rounded text-xs font-semibold">Periodo ACTUAL</span>
+              <span className="bg-green-100 text-green-700 px-2 py-0.5 rounded text-xs font-semibold">
+                Periodo ACTUAL
+              </span>
               <button
                 className="text-slate-500 hover:text-slate-700 text-sm inline-flex items-center gap-2"
                 onClick={() => setPdfNewFiles([])}
@@ -647,7 +678,9 @@ const DashboardContinuidad = () => {
     );
   }
 
-  // ---------------- DASHBOARD VIEW ----------------
+  /* =========================
+     DASHBOARD VIEW
+     ========================= */
   return (
     <div className="min-h-screen bg-slate-50 p-6 font-sans text-slate-800">
       <header className="mb-8 flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-200 pb-4">
@@ -699,7 +732,9 @@ const DashboardContinuidad = () => {
       </header>
 
       {warnMsg ? (
-        <div className="mb-6 p-4 rounded-lg border border-amber-200 bg-amber-50 text-amber-800 text-sm">{warnMsg}</div>
+        <div className="mb-6 p-4 rounded-lg border border-amber-200 bg-amber-50 text-amber-800 text-sm">
+          {warnMsg}
+        </div>
       ) : null}
 
       {/* METRICS */}
@@ -758,6 +793,7 @@ const DashboardContinuidad = () => {
       {/* CHARTS */}
       {totalDropouts > 0 ? (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
+          {/* BAR */}
           <div className="lg:col-span-2 bg-white p-6 rounded-xl shadow-sm border border-slate-100">
             <div className="flex items-center justify-between gap-3 flex-wrap">
               <div>
@@ -767,7 +803,6 @@ const DashboardContinuidad = () => {
                 </div>
               </div>
 
-              {/* ✅ Selector por categoría */}
               <div className="flex items-center gap-2">
                 <span className="text-xs text-slate-500">Categoría:</span>
                 <select
@@ -797,13 +832,13 @@ const DashboardContinuidad = () => {
             </div>
           </div>
 
+          {/* PIE */}
           <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-100">
             <div className="flex items-center justify-between gap-3 mb-3">
               <h3 className="text-lg font-bold text-slate-800">
                 Deserción por {pieMode === "horario" ? "Horario" : "Frecuencia"}
               </h3>
 
-              {/* ✅ Botón Horario ↔ Frecuencia */}
               <button
                 onClick={togglePieMode}
                 type="button"
@@ -818,27 +853,25 @@ const DashboardContinuidad = () => {
               <ResponsiveContainer width="100%" height="100%">
                 <PieChart>
                   <Pie
+                    data={chartDataPie}
+                    cx="50%"
+                    cy="50%"
+                    innerRadius={60}
+                    outerRadius={85}
+                    paddingAngle={4}
+                    dataKey="value"
+                    onClick={onClickPie}
+                  >
                     {chartDataPie.map((entry, index) => {
-  const name = entry?.name || "N/A";
+                      const name = entry?.name || "N/A";
 
-  // Si estás viendo FRECUENCIA => color fijo por mapa
-  if (pieMode === "frecuencia") {
-    return (
-      <Cell
-        key={`cell-${index}`}
-        fill={FRECUENCIA_COLORS[name] || "#94a3b8"}
-      />
-    );
-  }
+                      const color =
+                        pieMode === "frecuencia"
+                          ? (FRECUENCIA_COLORS[name] || FRECUENCIA_COLORS["N/A"])
+                          : HORARIO_COLORS[index % HORARIO_COLORS.length];
 
-  // Si estás viendo HORARIO => paleta por índice
-  return (
-    <Cell
-      key={`cell-${index}`}
-      fill={HORARIO_COLORS[index % HORARIO_COLORS.length]}
-    />
-  );
-})}
+                      return <Cell key={`cell-${index}`} fill={color} />;
+                    })}
                   </Pie>
                   <Tooltip />
                   <Legend />
@@ -852,16 +885,30 @@ const DashboardContinuidad = () => {
             </p>
           </div>
         </div>
-      ) : null}
+      ) : (
+        <div className="bg-white p-12 rounded-xl border border-dashed border-slate-300 text-center mb-8">
+          <div className="inline-flex bg-slate-100 p-4 rounded-full mb-4">
+            <FileText className="h-8 w-8 text-slate-400" />
+          </div>
+          <h3 className="text-lg font-medium text-slate-700">No hay datos para mostrar</h3>
+          <p className="text-slate-500 mb-4">Carga los PDFs para comenzar.</p>
+          <button onClick={() => setActiveTab("upload")} className="text-blue-600 font-semibold hover:underline">
+            Ir a Cargar PDFs
+          </button>
+        </div>
+      )}
 
       {/* CRM TABLE */}
       <div className="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
         <div className="p-6 border-b border-slate-100 flex flex-col gap-4">
           <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-3">
             <h3 className="text-lg font-bold text-slate-800">Lista de Gestión</h3>
+
             <div className="flex items-center gap-2">
-              <div className="text-xs text-slate-500">Mostrando {filteredData.length} de {totalDropouts}</div>
-              {/* ✅ Reset general de filtros */}
+              <div className="text-xs text-slate-500">
+                Mostrando {filteredData.length} de {totalDropouts}
+              </div>
+
               <button
                 type="button"
                 onClick={resetFilters}
@@ -874,7 +921,6 @@ const DashboardContinuidad = () => {
             </div>
           </div>
 
-          {/* ✅ 5 filtros + búsqueda */}
           <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
             <div className="relative">
               <select
@@ -969,7 +1015,10 @@ const DashboardContinuidad = () => {
             <tbody className="text-sm text-slate-700 divide-y divide-slate-50">
               {filteredData.length ? (
                 filteredData.map((s) => (
-                  <tr key={s.id} className={`hover:bg-slate-50 transition-colors ${contacted.has(s.id) ? "bg-emerald-50/30" : ""}`}>
+                  <tr
+                    key={s.id}
+                    className={`hover:bg-slate-50 transition-colors ${contacted.has(s.id) ? "bg-emerald-50/30" : ""}`}
+                  >
                     <td className="p-4">
                       {contacted.has(s.id) ? (
                         <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
@@ -990,14 +1039,18 @@ const DashboardContinuidad = () => {
                     <td className="p-4 text-slate-600">{s.frequencyNorm || "N/A"}</td>
 
                     <td className="p-4">
-                      <span className="px-2 py-1 bg-slate-100 rounded text-xs font-bold text-slate-600">{s.levelNorm}</span>
+                      <span className="px-2 py-1 bg-slate-100 rounded text-xs font-bold text-slate-600">
+                        {s.levelNorm}
+                      </span>
                     </td>
 
                     <td className="p-4 text-slate-600">{s.scheduleBlock}</td>
 
                     <td className="p-4 text-slate-600">
                       {s.email ? (
-                        <a className="text-blue-600 hover:underline" href={`mailto:${s.email}`}>{s.email}</a>
+                        <a className="text-blue-600 hover:underline" href={`mailto:${s.email}`}>
+                          {s.email}
+                        </a>
                       ) : (
                         <span className="text-slate-400">N/A</span>
                       )}
@@ -1005,7 +1058,9 @@ const DashboardContinuidad = () => {
 
                     <td className="p-4 text-slate-600">
                       {s.phone ? (
-                        <a className="text-blue-600 hover:underline" href={`tel:${s.phone}`}>{s.phone}</a>
+                        <a className="text-blue-600 hover:underline" href={`tel:${s.phone}`}>
+                          {s.phone}
+                        </a>
                       ) : (
                         <span className="text-slate-400">N/A</span>
                       )}
